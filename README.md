@@ -1,6 +1,6 @@
-# Comptes
+# Pécune
 
-Application locale pour le suivi des comptes de la famille. Elle remplace le classeur de dépenses et d’encaissements.
+Suivi des finances personnelles, sur ce Mac. L’application remplace le classeur de dépenses et d’encaissements.
 
 ```bash
 npm install
