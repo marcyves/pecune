@@ -41,6 +41,10 @@ export function dateToIso(date: Date): string | null {
   return isoDate(date.getFullYear(), date.getMonth() + 1, date.getDate())
 }
 
+export function todayIso(now = new Date()): string {
+  return dateToIso(now) ?? '1970-01-01'
+}
+
 export function excelSerialToIso(serial: number): string | null {
   if (!Number.isFinite(serial)) return null
   const whole = Math.floor(serial)

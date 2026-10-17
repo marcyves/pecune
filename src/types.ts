@@ -1,5 +1,5 @@
 export type Nature = 'depense' | 'encaissement'
-export type AccountKind = 'releve' | 'solde'
+export type AccountKind = 'courant' | 'epargne' | 'titre'
 export type DateFormat = 'JJ/MM/AAAA' | 'AAAA-MM-JJ' | 'JJ-MM-AAAA' | 'JJ.MM.AAAA'
 export type DecimalSeparator = ',' | '.'
 
@@ -23,6 +23,8 @@ export type Account = {
   mapping: Mapping | null
   openingCents: number | null
   openingDate: string | null
+  cashMillis: number | null
+  cashValuedOn: string | null
 }
 
 export type Category = {
@@ -31,6 +33,7 @@ export type Category = {
   familyId: number
   sortOrder: number
   archived: boolean
+  role: 'virement' | null
 }
 
 export type Family = {
@@ -73,7 +76,7 @@ export type FamilyRow = {
 }
 
 export type StatementSummary = {
-  kind: 'releve'
+  kind: 'courant'
   year: number
   balanceMissing: boolean
   openingCents: number | null
@@ -88,14 +91,34 @@ export type StatementSummary = {
 }
 
 export type BalanceSummary = {
-  kind: 'solde'
+  kind: 'epargne'
   year: number
   balances: (number | null)[]
+  entered: (number | null)[]
   expense: (number | null)[]
   income: (number | null)[]
 }
 
-export type AccountSummary = StatementSummary | BalanceSummary
+export type Position = {
+  id: number
+  accountId: number
+  name: string
+  quantityMicros: number
+  valueMillis: number
+  valuedOn: string | null
+}
+
+export type HoldingsSummary = {
+  kind: 'titre'
+  year: number
+  positions: Position[]
+  securitiesMillis: number
+  cashMillis: number
+  cashValuedOn: string | null
+  totalMillis: number
+}
+
+export type AccountSummary = StatementSummary | BalanceSummary | HoldingsSummary
 
 export type GlobalAccountRow = {
   accountId: number
@@ -130,12 +153,35 @@ export type OperationView = {
   amountCents: number
   categoryId: number | null
   categoryName: string | null
+  counterpartyAccountId: number | null
+  counterpartyAccountName: string | null
+  imported: boolean
+}
+
+export type TransferMatch = {
+  id: number
+  date: string
+  label: string
+  amountCents: number
+}
+
+export type TransferView = {
+  id: number
+  date: string
+  amountCents: number
+  fromAccountId: number
+  fromAccountName: string
+  fromBankName: string
+  toAccountId: number
+  toAccountName: string
+  toBankName: string
 }
 
 export type UnpointedView = {
   id: number
   accountId: number
   accountName: string
+  bankName: string
   date: string
   label: string
   amountCents: number

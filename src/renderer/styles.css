@@ -33,6 +33,22 @@ button.primary {
 
 button.danger { color: #8d2f2f; }
 
+button.icon.alert {
+  background: #8d2f2f;
+  color: #f6f1e7;
+  border-color: #8d2f2f;
+}
+
+button.icon.alert:hover {
+  background: #732626;
+  border-color: #732626;
+}
+
+button.small {
+  font-size: 0.85rem;
+  padding: 0.2rem 0.5rem;
+}
+
 button.link {
   border: 0;
   background: transparent;
@@ -132,6 +148,18 @@ h2 { font-size: 1.25rem; }
   margin-bottom: 1rem;
 }
 
+.tabs {
+  display: flex;
+  gap: 0.35rem;
+  margin: 0 0 0.85rem;
+}
+
+.tabs button.active {
+  background: #1f4a38;
+  color: #f6f1e7;
+  border-color: #1f4a38;
+}
+
 .toolbar, .form-row, .inline {
   display: flex;
   flex-wrap: wrap;
@@ -188,6 +216,11 @@ table.grid th, table.grid td {
   white-space: nowrap;
 }
 
+table.grid td input.amount {
+  width: 9rem;
+  min-width: 9rem;
+}
+
 table.grid th:first-child, table.grid td:first-child {
   position: sticky;
   left: 0;
@@ -195,6 +228,20 @@ table.grid th:first-child, table.grid td:first-child {
   text-align: left;
   min-width: 12rem;
 }
+
+table.holdings td input.amount,
+table.holdings td input.valued-on,
+.form-row input.amount {
+  width: 9rem;
+  min-width: 9rem;
+  max-width: none;
+}
+table.holdings td input.valued-on { width: 11rem; min-width: 11rem; }
+table.holdings th:nth-child(3),
+table.holdings td:nth-child(3) { min-width: 9rem; }
+table.holdings th:nth-child(4),
+table.holdings td:nth-child(4) { min-width: 11rem; }
+table.holdings td:last-child { white-space: normal; }
 
 .num { text-align: right; }
 .neg { color: #8d2f2f; }
@@ -248,17 +295,34 @@ table.grid th:first-child, table.grid td:first-child {
   white-space: normal;
 }
 
+td.actions {
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+td.actions button + button {
+  margin-left: 0.35rem;
+}
+
 th.point,
 td.point {
-  width: 20rem;
-  overflow: hidden;
+  width: 24rem;
+  min-width: 18rem;
+  overflow: visible;
 }
 
 .point-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.35rem;
   min-width: 0;
+}
+
+.point-row select.transfer-target {
+  flex: 1 1 10rem;
+  width: auto;
+  min-width: 10rem;
 }
 
 .point-row select {
@@ -364,7 +428,38 @@ td.num button.amount {
 
 .account-list { display: grid; gap: 1.1rem; }
 
-.account-list h2 { margin: 0 0 0.55rem; }
+.bank-head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0 0 0.55rem;
+}
+
+.bank-head h2 { margin: 0; }
+
+.bank-total {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.accounts-total {
+  display: block;
+  margin: 0 0 0.2rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.fixed-bank {
+  display: grid;
+  gap: 0.25rem;
+  align-content: end;
+}
+
+.fixed-bank strong { font-size: 1rem; }
+
+.bank-head button.icon {
+  width: 1.7rem;
+  height: 1.7rem;
+}
 
 .account-bank {
   display: flex;

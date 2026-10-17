@@ -30,6 +30,23 @@ export function formatInputAmount(cents: number): string {
   return `${negative ? '-' : ''}${euros},${rest}`
 }
 
+export function formatMillis(millis: number): string {
+  const negative = millis < 0
+  const absolute = Math.abs(millis)
+  const euros = Math.floor(absolute / 1000)
+  const rest = String(absolute % 1000).padStart(3, '0')
+  const grouped = String(euros).replace(/\B(?=(\d{3})+(?!\d))/g, '\u202f')
+  return `${negative ? '−' : ''}${grouped},${rest}`
+}
+
+export function formatInputMillis(millis: number): string {
+  const negative = millis < 0
+  const absolute = Math.abs(millis)
+  const euros = Math.floor(absolute / 1000)
+  const rest = String(absolute % 1000).padStart(3, '0')
+  return `${negative ? '-' : ''}${euros},${rest}`
+}
+
 export function formatIsoDate(iso: string): string {
   const [year, month, day] = iso.split('-')
   return `${day}/${month}/${year}`

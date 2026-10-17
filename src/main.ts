@@ -15,20 +15,33 @@ import {
   createAccount,
   createCategory,
   createFamily,
+  deleteAccount,
+  deletePosition,
   globalSummary,
   listAccounts,
   listBatches,
   listFamilies,
+  createSavingsMovement,
+  createSavingsTransfer,
+  deleteManualOperation,
+  deleteTransfer,
   listOperations,
+  listTransfers,
   listUnpointed,
   moveCategory,
   moveFamily,
   pointOperation,
   previewImport,
+  previewOperationTransfer,
+  previewSavingsTransfer,
+  savePosition,
+  setCash,
   setMonthlyBalance,
+  unpointOperation,
   updateAccount,
   updateCategory,
   updateFamily,
+  updateManualOperation,
 } from './ledger.ts'
 import type { AccountKind, Mapping } from './types.ts'
 
@@ -134,19 +147,21 @@ function accountDetail(id: number, year: number) {
     summary: accountSummary(db, id, year),
     operations: listOperations(db, id, year),
     batches: listBatches(db, id),
+    transfers: listTransfers(db, id, year),
   }
 }
 
 function saveAccount(input: SaveAccount) {
   const db = requireDatabase()
-  const openingCents = input.kind === 'releve' ? centsFromInput(input.openingAmount) : null
-  const openingDate = input.kind === 'releve' && input.openingDate ? input.openingDate : null
+  const keepsOpening = input.kind === 'courant' || input.kind === 'epargne'
+  const openingCents = keepsOpening ? centsFromInput(input.openingAmount) : null
+  const openingDate = keepsOpening && input.openingDate ? input.openingDate : null
   if (input.id) {
     return updateAccount(db, input.id, {
       name: input.name,
       bankName: input.bankName,
       archived: input.archived,
-      mapping: input.kind === 'releve' ? input.mapping : null,
+      mapping: input.kind === 'courant' ? input.mapping : null,
       openingCents,
       openingDate,
     })
@@ -215,6 +230,9 @@ function register(): void {
   handle('workspace', (year) => workspace(Number(year)))
   handle('accountDetail', (id, year) => accountDetail(Number(id), Number(year)))
   handle('saveAccount', (input) => saveAccount(input as SaveAccount))
+  handle('deleteAccount', (id) => {
+    deleteAccount(requireDatabase(), Number(id))
+  })
   handle('saveFamily', (input) => {
     const value = input as { id?: number; name: string; nature: 'depense' | 'encaissement'; archived: boolean }
     const db = requireDatabase()
@@ -231,6 +249,30 @@ function register(): void {
   handle('moveCategory', (id, direction) => moveCategory(requireDatabase(), Number(id), direction as -1 | 1))
   handle('setMonthlyBalance', (accountId, month, raw) => {
     setMonthlyBalance(requireDatabase(), Number(accountId), String(month), centsFromInput(String(raw)))
+  })
+  handle('savePosition', (input) => {
+    const value = input as {
+      accountId: number
+      id?: number
+      name: string
+      quantity: string
+      value: string
+      valuedOn: string
+    }
+    return savePosition(requireDatabase(), {
+      accountId: Number(value.accountId),
+      id: value.id === undefined || value.id === null ? undefined : Number(value.id),
+      name: String(value.name ?? ''),
+      quantity: String(value.quantity ?? ''),
+      value: String(value.value ?? ''),
+      valuedOn: String(value.valuedOn ?? ''),
+    })
+  })
+  handle('deletePosition', (id) => {
+    deletePosition(requireDatabase(), Number(id))
+  })
+  handle('setCash', (accountId, raw, valuedOn) => {
+    setCash(requireDatabase(), Number(accountId), String(raw ?? ''), String(valuedOn ?? ''))
   })
   handle('pickImportFile', async () => {
     const choice = await dialog.showOpenDialog({
@@ -249,9 +291,54 @@ function register(): void {
   )
   handle('cancelBatch', (batchId) => cancelBatch(requireDatabase(), Number(batchId)))
   handle('unpointed', (accountId) => listUnpointed(requireDatabase(), accountId === null ? null : Number(accountId)))
-  handle('pointOperation', (operationId, categoryId) =>
-    pointOperation(requireDatabase(), Number(operationId), Number(categoryId)),
+  handle('previewOperationTransfer', (operationId, counterpartyAccountId) =>
+    previewOperationTransfer(requireDatabase(), Number(operationId), Number(counterpartyAccountId)),
   )
+  handle('previewSavingsTransfer', (toAccountId, date, amount) =>
+    previewSavingsTransfer(requireDatabase(), Number(toAccountId), String(date ?? ''), String(amount ?? '')),
+  )
+  handle('pointOperation', (operationId, categoryId, counterpartyAccountId, matchedOperationId) =>
+    pointOperation(
+      requireDatabase(),
+      Number(operationId),
+      Number(categoryId),
+      counterpartyAccountId === null || counterpartyAccountId === undefined || counterpartyAccountId === ''
+        ? null
+        : Number(counterpartyAccountId),
+      matchedOperationId === null || matchedOperationId === undefined || matchedOperationId === ''
+        ? null
+        : Number(matchedOperationId),
+    ),
+  )
+  handle('createSavingsMovement', (accountId, date, label, amount, direction) => {
+    if (direction !== 'entree' && direction !== 'sortie') throw new LedgerError('Choisis une entrée ou une sortie.')
+    return createSavingsMovement(
+      requireDatabase(),
+      Number(accountId),
+      String(date ?? ''),
+      String(label ?? ''),
+      String(amount ?? ''),
+      direction,
+    )
+  })
+  handle('createTransfer', (fromAccountId, toAccountId, date, amount, matchedOperationId) =>
+    createSavingsTransfer(
+      requireDatabase(),
+      Number(fromAccountId),
+      Number(toAccountId),
+      String(date ?? ''),
+      String(amount ?? ''),
+      matchedOperationId === null || matchedOperationId === undefined || matchedOperationId === ''
+        ? null
+        : Number(matchedOperationId),
+    ),
+  )
+  handle('deleteTransfer', (transferId) => deleteTransfer(requireDatabase(), Number(transferId)))
+  handle('unpointOperation', (operationId) => unpointOperation(requireDatabase(), Number(operationId)))
+  handle('updateManualOperation', (operationId, date, label, amount) =>
+    updateManualOperation(requireDatabase(), Number(operationId), String(date ?? ''), String(label ?? ''), String(amount ?? '')),
+  )
+  handle('deleteManualOperation', (operationId) => deleteManualOperation(requireDatabase(), Number(operationId)))
 }
 
 function createWindow(): void {

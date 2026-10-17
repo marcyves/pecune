@@ -1,4 +1,4 @@
-import { lastDay, monthEntirelyBefore, monthKey, previousMonth } from './dates.ts'
+import { lastDay, monthEntirelyBefore, monthKey } from './dates.ts'
 import { sumNumbers } from './format.ts'
 import type {
   AccountKind,
@@ -55,7 +55,7 @@ export function statementSummary(input: {
   }
 
   return {
-    kind: 'releve',
+    kind: 'courant',
     year,
     balanceMissing: missing,
     openingCents,
@@ -72,45 +72,54 @@ export function statementSummary(input: {
 
 export function balanceSummary(year: number, balances: Map<string, number>): BalanceSummary {
   const figures = balanceFigures(year, balances)
-  return { kind: 'solde', year, ...figures }
+  return { kind: 'epargne', year, ...figures }
 }
 
 export function balanceFigures(
   year: number,
   balances: Map<string, number>,
-): { balances: (number | null)[]; expense: (number | null)[]; income: (number | null)[] } {
+  flows: { incoming: number[]; outgoing: number[] } = {
+    incoming: Array.from({ length: 12 }, () => 0),
+    outgoing: Array.from({ length: 12 }, () => 0),
+  },
+): { balances: (number | null)[]; entered: (number | null)[]; expense: (number | null)[]; income: (number | null)[] } {
   const shown: (number | null)[] = []
+  const entered: (number | null)[] = []
   const expense: (number | null)[] = []
   const income: (number | null)[] = []
+  const openingKey = monthKey(year - 1, 12)
+  let carried: number | null = balances.has(openingKey) ? (balances.get(openingKey) as number) : null
   for (let month = 1; month <= 12; month += 1) {
-    const currentKey = monthKey(year, month)
-    const current = balances.has(currentKey) ? (balances.get(currentKey) as number) : null
+    const index = month - 1
+    const key = monthKey(year, month)
+    const typed = balances.has(key) ? (balances.get(key) as number) : null
+    const incoming = flows.incoming[index] ?? 0
+    const outgoing = flows.outgoing[index] ?? 0
+    entered.push(typed)
+    const current = typed !== null ? typed : carried === null ? null : carried + incoming - outgoing
     shown.push(current)
-    if (current === null) {
-      expense.push(null)
-      income.push(null)
-      continue
-    }
-    const previous = previousMonth(year, month)
-    const previousKey = monthKey(previous.year, previous.month)
-    if (!balances.has(previousKey)) {
-      expense.push(null)
-      income.push(null)
-      continue
-    }
-    const delta = current - (balances.get(previousKey) as number)
-    if (delta < 0) {
-      expense.push(-delta)
-      income.push(0)
-    } else if (delta > 0) {
-      expense.push(0)
-      income.push(delta)
+    if (typed !== null && carried !== null) {
+      const delta = typed - carried
+      if (delta < 0) {
+        expense.push(-delta)
+        income.push(0)
+      } else if (delta > 0) {
+        expense.push(0)
+        income.push(delta)
+      } else {
+        expense.push(0)
+        income.push(0)
+      }
+    } else if (typed === null && (incoming > 0 || outgoing > 0)) {
+      expense.push(outgoing > 0 ? outgoing : null)
+      income.push(incoming > 0 ? incoming : null)
     } else {
-      expense.push(0)
-      income.push(0)
+      expense.push(null)
+      income.push(null)
     }
+    if (current !== null) carried = current
   }
-  return { balances: shown, expense, income }
+  return { balances: shown, entered, expense, income }
 }
 
 export function statementBalances(

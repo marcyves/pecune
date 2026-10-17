@@ -1,12 +1,13 @@
 import { basename } from 'node:path'
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite'
-import { isoDate, monthKey } from './dates.ts'
+import { isoDate, lastDay, monthEntirelyBefore, todayIso } from './dates.ts'
 import { LedgerError } from './errors.ts'
-import { parseUserAmount } from './money.ts'
+import { lineMillis, parseQuantity, parseUserAmount, parseUserMillis } from './money.ts'
 import { classifyImport, operationKey, readTabularFile } from './parse-file.ts'
-import { balanceFigures, globalFromAccounts, statementSummary } from './summary.ts'
+import { globalFromAccounts, statementSummary } from './summary.ts'
 import type {
   Account,
+  AccountKind,
   AccountSummary,
   BatchView,
   Category,
@@ -16,7 +17,10 @@ import type {
   Mapping,
   Nature,
   OperationView,
+  Position,
   Preview,
+  TransferMatch,
+  TransferView,
   UnpointedView,
 } from './types.ts'
 
@@ -28,7 +32,7 @@ export function createAccount(
   input: {
     name: string
     bankName: string
-    kind: 'releve' | 'solde'
+    kind: AccountKind
     mapping?: Mapping | null
     openingCents?: number | null
     openingDate?: string | null
@@ -38,14 +42,16 @@ export function createAccount(
   const bankId = ensureBank(database, input.bankName)
   const mapping = normalizeMapping(input.mapping ?? null)
   const opening = normalizeOpening(input.openingCents ?? null, input.openingDate ?? null)
-  if (input.kind !== 'releve' && input.kind !== 'solde') throw new LedgerError('Type de compte inconnu.')
-  const result = insert(database, 'INSERT INTO accounts (name, bank_id, kind, mapping_json, opening_cents, opening_date) VALUES (?, ?, ?, ?, ?, ?)', [
+  if (input.kind !== 'courant' && input.kind !== 'epargne' && input.kind !== 'titre') throw new LedgerError('Type de compte inconnu.')
+  assertAccountName(database, name, bankId)
+  const result = insert(database, 'INSERT INTO accounts (name, bank_id, kind, mapping_json, opening_cents, opening_date, cash_millis) VALUES (?, ?, ?, ?, ?, ?, ?)', [
     name,
     bankId,
     input.kind,
-    mapping ? JSON.stringify(mapping) : null,
-    input.kind === 'releve' ? opening.cents : null,
-    input.kind === 'releve' ? opening.date : null,
+    input.kind === 'courant' && mapping ? JSON.stringify(mapping) : null,
+    input.kind === 'courant' || input.kind === 'epargne' ? opening.cents : null,
+    input.kind === 'courant' || input.kind === 'epargne' ? opening.date : null,
+    input.kind === 'titre' ? 0 : null,
   ])
   return getAccount(database, result)
 }
@@ -67,6 +73,7 @@ export function updateAccount(
   const bankId = ensureBank(database, input.bankName)
   const mapping = normalizeMapping(input.mapping)
   const opening = normalizeOpening(input.openingCents, input.openingDate)
+  assertAccountName(database, name, bankId, id)
   run(
     database,
     `UPDATE accounts
@@ -76,9 +83,9 @@ export function updateAccount(
       name,
       bankId,
       input.archived ? 1 : 0,
-      current.kind === 'releve' && mapping ? JSON.stringify(mapping) : null,
-      current.kind === 'releve' ? opening.cents : null,
-      current.kind === 'releve' ? opening.date : null,
+      current.kind === 'courant' && mapping ? JSON.stringify(mapping) : null,
+      current.kind === 'courant' || current.kind === 'epargne' ? opening.cents : null,
+      current.kind === 'courant' || current.kind === 'epargne' ? opening.date : null,
       id,
     ],
   )
@@ -94,16 +101,14 @@ export function accountFigures(
   database: DatabaseSync,
   account: Account,
   asOf: string,
-): { currentCents: number | null; unpointedCents: number | null } {
-  if (account.kind === 'solde') {
-    const row = one(
-      database,
-      `SELECT amount_cents FROM monthly_balances
-       WHERE account_id = ? AND month <= ?
-       ORDER BY month DESC LIMIT 1`,
-      [account.id, asOf.slice(0, 7)],
-    )
-    return { currentCents: row ? numberValue(row.amount_cents) : null, unpointedCents: null }
+): { currentCents: number | null; unpointedCents: number | null; securitiesMillis: number | null } {
+  if (account.kind === 'titre') {
+    const securitiesMillis = securitiesBalance(database, account.id)
+    const totalMillis = securitiesMillis + (account.cashMillis ?? 0)
+    return { currentCents: millisToCents(totalMillis), unpointedCents: null, securitiesMillis }
+  }
+  if (account.kind === 'epargne') {
+    return { currentCents: savingsBalanceAsOf(database, account.id, asOf), unpointedCents: null, securitiesMillis: null }
   }
   const unpointed = one(
     database,
@@ -113,7 +118,7 @@ export function accountFigures(
   )
   const unpointedCents = numberValue(unpointed?.total)
   if (account.openingCents === null || account.openingDate === null || asOf < account.openingDate) {
-    return { currentCents: null, unpointedCents }
+    return { currentCents: null, unpointedCents, securitiesMillis: null }
   }
   const moved = one(
     database,
@@ -121,13 +126,27 @@ export function accountFigures(
      FROM operations WHERE account_id = ? AND date >= ? AND date <= ?`,
     [account.id, account.openingDate, asOf],
   )
-  return { currentCents: account.openingCents + numberValue(moved?.total), unpointedCents }
+  return { currentCents: account.openingCents + numberValue(moved?.total), unpointedCents, securitiesMillis: null }
 }
 
 export function getAccount(database: DatabaseSync, id: number): Account {
   const row = one(database, `${accountSelect()} WHERE a.id = ?`, [id])
   if (!row) throw new LedgerError('Compte introuvable.')
   return mapAccount(row)
+}
+
+export function deleteAccount(database: DatabaseSync, id: number): void {
+  const account = getAccount(database, id)
+  if (!account.archived) throw new LedgerError('Seul un compte archivé peut être effacé.')
+  transaction(database, () => {
+    detachTransfers(database, id)
+    run(database, 'DELETE FROM operations WHERE account_id = ?', [id])
+    run(database, 'DELETE FROM import_batches WHERE account_id = ?', [id])
+    run(database, 'DELETE FROM monthly_balances WHERE account_id = ?', [id])
+    run(database, 'DELETE FROM positions WHERE account_id = ?', [id])
+    run(database, 'DELETE FROM accounts WHERE id = ?', [id])
+    deleteEmptyBanks(database)
+  })
 }
 
 export function createFamily(database: DatabaseSync, input: { name: string; nature: Nature }): Family {
@@ -201,7 +220,7 @@ export function setMonthlyBalance(
   amountCents: number | null,
 ): void {
   const account = getAccount(database, accountId)
-  if (account.kind !== 'solde') throw new LedgerError('Ce compte se met à jour par relevé.')
+  if (account.kind !== 'epargne') throw new LedgerError('Ce compte n’est pas un compte d’épargne.')
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new LedgerError('Mois illisible.')
   if (amountCents === null) {
     run(database, 'DELETE FROM monthly_balances WHERE account_id = ? AND month = ?', [accountId, month])
@@ -223,7 +242,7 @@ export async function previewImport(
   sheetName?: string,
 ): Promise<Preview> {
   const account = getAccount(database, accountId)
-  if (account.kind !== 'releve') return { status: 'error', message: 'Ce compte n’a pas de relevé.' }
+  if (account.kind !== 'courant') return { status: 'error', message: 'Ce compte n’est pas un compte courant.' }
   if (!account.mapping) return { status: 'error', message: 'La correspondance des colonnes n’est pas définie.' }
   try {
     const table = await readTabularFile(filePath, sheetName)
@@ -304,6 +323,8 @@ export function cancelBatch(database: DatabaseSync, batchId: number): number {
   if (!batch) throw new LedgerError('Import introuvable.')
   const count = numberValue((one(database, 'SELECT COUNT(*) AS count FROM operations WHERE batch_id = ?', [batchId]) as Row).count)
   transaction(database, () => {
+    const rows = all(database, 'SELECT id FROM operations WHERE batch_id = ?', [batchId])
+    for (const row of rows) detachOperation(database, numberValue(row.id))
     run(database, 'DELETE FROM operations WHERE batch_id = ?', [batchId])
     run(database, 'DELETE FROM import_batches WHERE id = ?', [batchId])
   })
@@ -313,9 +334,23 @@ export function cancelBatch(database: DatabaseSync, batchId: number): number {
 export function listOperations(database: DatabaseSync, accountId: number, year: number): OperationView[] {
   return all(
     database,
-    `SELECT o.id, o.date, o.label, o.amount_cents, o.category_id, c.name AS category_name
+    `SELECT o.id, o.date, o.label, o.amount_cents, o.category_id, c.name AS category_name,
+            CASE
+              WHEN t.id IS NULL THEN NULL
+              WHEN t.from_account_id = o.account_id THEN t.to_account_id
+              ELSE t.from_account_id
+            END AS counterparty_id,
+            CASE
+              WHEN t.id IS NULL THEN NULL
+              WHEN t.from_account_id = o.account_id THEN ta.name
+              ELSE fa.name
+            END AS counterparty_name,
+            o.batch_id
      FROM operations o
      LEFT JOIN categories c ON c.id = o.category_id
+     LEFT JOIN transfers t ON t.source_operation_id = o.id OR t.dest_operation_id = o.id
+     LEFT JOIN accounts fa ON fa.id = t.from_account_id
+     LEFT JOIN accounts ta ON ta.id = t.to_account_id
      WHERE o.account_id = ? AND o.date >= ? AND o.date <= ?
      ORDER BY o.date, o.id`,
     [accountId, `${year}-01-01`, `${year}-12-31`],
@@ -326,10 +361,11 @@ export function listUnpointed(database: DatabaseSync, accountId: number | null):
   const keywords = learnKeywords(database)
   const rows = all(
     database,
-    `SELECT o.id, o.account_id, a.name AS account_name, o.date, o.label, o.amount_cents
+    `SELECT o.id, o.account_id, a.name AS account_name, b.name AS bank_name, o.date, o.label, o.amount_cents
      FROM operations o
      JOIN accounts a ON a.id = o.account_id
-     WHERE o.category_id IS NULL AND a.archived = 0
+     JOIN banks b ON b.id = a.bank_id
+     WHERE o.category_id IS NULL AND a.archived = 0 AND a.kind = 'courant'
        AND (? IS NULL OR o.account_id = ?)
      ORDER BY o.date, o.id`,
     [accountId, accountId],
@@ -340,6 +376,7 @@ export function listUnpointed(database: DatabaseSync, accountId: number | null):
       id: numberValue(row.id),
       accountId: numberValue(row.account_id),
       accountName: String(row.account_name),
+      bankName: String(row.bank_name),
       date: String(row.date),
       label: String(row.label),
       amountCents,
@@ -348,37 +385,311 @@ export function listUnpointed(database: DatabaseSync, accountId: number | null):
   })
 }
 
-export function pointOperation(database: DatabaseSync, operationId: number, categoryId: number): void {
-  const operation = one(database, 'SELECT id, amount_cents FROM operations WHERE id = ?', [operationId])
+export function previewOperationTransfer(
+  database: DatabaseSync,
+  operationId: number,
+  counterpartyAccountId: number,
+): TransferMatch[] {
+  const operation = one(database, 'SELECT id, date, amount_cents FROM operations WHERE id = ?', [operationId])
   if (!operation) throw new LedgerError('Opération introuvable.')
-  const category = one(
+  return matchingLines(
     database,
-    `SELECT c.archived AS category_archived, f.archived AS family_archived, f.nature
-     FROM categories c JOIN families f ON f.id = c.family_id WHERE c.id = ?`,
-    [categoryId],
+    counterpartyAccountId,
+    String(operation.date),
+    -numberValue(operation.amount_cents),
+    numberValue(operation.id),
   )
-  if (!category) throw new LedgerError('Catégorie introuvable.')
-  if (numberValue(category.category_archived) === 1 || numberValue(category.family_archived) === 1) {
-    throw new LedgerError('Cette catégorie est archivée.')
-  }
-  const nature = numberValue(operation.amount_cents) < 0 ? 'depense' : 'encaissement'
-  if (category.nature !== nature) {
-    throw new LedgerError(
-      nature === 'depense'
-        ? 'Une dépense prend une catégorie de dépense.'
-        : 'Un encaissement prend une catégorie d’encaissement.',
+}
+
+export function previewSavingsTransfer(
+  database: DatabaseSync,
+  toAccountId: number,
+  date: string,
+  rawAmount: string,
+): TransferMatch[] {
+  const amount = centsFromInput(rawAmount)
+  if (amount === null || amount <= 0) throw new LedgerError('Le montant du virement doit être positif.')
+  return matchingLines(database, toAccountId, transferDate(date), amount, null)
+}
+
+export function pointOperation(
+  database: DatabaseSync,
+  operationId: number,
+  categoryId: number,
+  counterpartyAccountId: number | null = null,
+  matchedOperationId: number | null = null,
+): void {
+  transaction(database, () => {
+    const operation = one(
+      database,
+      'SELECT id, account_id, date, amount_cents FROM operations WHERE id = ?',
+      [operationId],
     )
+    if (!operation) throw new LedgerError('Opération introuvable.')
+    if (one(database, 'SELECT id FROM transfers WHERE dest_operation_id = ?', [operationId])) {
+      throw new LedgerError('Cette ligne vient d’un virement interne.')
+    }
+    const category = one(
+      database,
+      `SELECT c.archived AS category_archived, c.role, f.archived AS family_archived, f.nature
+       FROM categories c JOIN families f ON f.id = c.family_id WHERE c.id = ?`,
+      [categoryId],
+    )
+    if (!category) throw new LedgerError('Catégorie introuvable.')
+    if (numberValue(category.category_archived) === 1 || numberValue(category.family_archived) === 1) {
+      throw new LedgerError('Cette catégorie est archivée.')
+    }
+    const amount = numberValue(operation.amount_cents)
+    const nature = amount < 0 ? 'depense' : 'encaissement'
+    if (category.nature !== nature) {
+      throw new LedgerError(
+        nature === 'depense'
+          ? 'Une dépense prend une catégorie de dépense.'
+          : 'Un encaissement prend une catégorie d’encaissement.',
+      )
+    }
+    detachOperation(database, operationId, matchedOperationId)
+    if (category.role === 'virement') {
+      if (counterpartyAccountId === null) throw new LedgerError('Choisis le compte du virement.')
+      const sourceAccountId = numberValue(operation.account_id)
+      const fromAccountId = amount < 0 ? sourceAccountId : counterpartyAccountId
+      const toAccountId = amount < 0 ? counterpartyAccountId : sourceAccountId
+      linkTransfer(database, {
+        fromAccountId,
+        toAccountId,
+        date: String(operation.date),
+        amountCents: Math.abs(amount),
+        sourceOperationId: operationId,
+        matchedOperationId,
+      })
+    }
+    run(database, 'UPDATE operations SET category_id = ?, pointed_at = ? WHERE id = ?', [
+      categoryId,
+      new Date().toISOString(),
+      operationId,
+    ])
+  })
+}
+
+export function createSavingsMovement(
+  database: DatabaseSync,
+  accountId: number,
+  date: string,
+  label: string,
+  rawAmount: string,
+  direction: 'entree' | 'sortie',
+): void {
+  const account = getAccount(database, accountId)
+  if (account.kind !== 'epargne') throw new LedgerError('Ce compte n’est pas un compte d’épargne.')
+  if (direction !== 'entree' && direction !== 'sortie') throw new LedgerError('Choisis une entrée ou une sortie.')
+  const amount = centsFromInput(rawAmount)
+  if (amount === null || amount <= 0) throw new LedgerError('Le montant doit être positif.')
+  const name = label.trim() || 'Mouvement'
+  insert(
+    database,
+    'INSERT INTO operations (account_id, batch_id, date, label, amount_cents) VALUES (?, NULL, ?, ?, ?)',
+    [accountId, transferDate(date), name, direction === 'sortie' ? -amount : amount],
+  )
+}
+
+export function createSavingsTransfer(
+  database: DatabaseSync,
+  fromAccountId: number,
+  toAccountId: number,
+  date: string,
+  rawAmount: string,
+  matchedOperationId: number | null = null,
+): void {
+  const from = getAccount(database, fromAccountId)
+  if (from.kind !== 'epargne') throw new LedgerError('Pour un compte courant, le virement se pointe sur l’opération.')
+  const amount = centsFromInput(rawAmount)
+  if (amount === null || amount <= 0) throw new LedgerError('Le montant du virement doit être positif.')
+  transaction(database, () => {
+    linkTransfer(database, {
+      fromAccountId,
+      toAccountId,
+      date: transferDate(date),
+      amountCents: amount,
+      sourceOperationId: null,
+      matchedOperationId,
+    })
+  })
+}
+
+export function unpointOperation(database: DatabaseSync, operationId: number): void {
+  const operation = one(database, 'SELECT id FROM operations WHERE id = ?', [operationId])
+  if (!operation) throw new LedgerError('Opération introuvable.')
+  const transfer = one(
+    database,
+    'SELECT id FROM transfers WHERE source_operation_id = ? OR dest_operation_id = ?',
+    [operationId, operationId],
+  )
+  if (transfer) {
+    detachTransfer(database, numberValue(transfer.id), null)
+    return
   }
-  run(database, 'UPDATE operations SET category_id = ?, pointed_at = ? WHERE id = ?', [
-    categoryId,
-    new Date().toISOString(),
+  run(database, 'UPDATE operations SET category_id = NULL, pointed_at = NULL WHERE id = ?', [operationId])
+}
+
+export function updateManualOperation(
+  database: DatabaseSync,
+  operationId: number,
+  date: string,
+  label: string,
+  rawAmount: string,
+): void {
+  const operation = manualOperation(database, operationId)
+  const amount = centsFromInput(rawAmount)
+  if (amount === null || amount === 0) throw new LedgerError('Le montant est requis.')
+  const nextDate = transferDate(date)
+  const name = requiredName(label, 'Le libellé est requis.')
+  const linked = one(
+    database,
+    'SELECT id FROM transfers WHERE source_operation_id = ? OR dest_operation_id = ?',
+    [operationId, operationId],
+  )
+  if (linked && (nextDate !== String(operation.date) || amount !== numberValue(operation.amount_cents))) {
+    throw new LedgerError('Pour changer le montant ou la date, ôte d’abord le pointage.')
+  }
+  run(database, 'UPDATE operations SET date = ?, label = ?, amount_cents = ? WHERE id = ?', [
+    nextDate,
+    name,
+    amount,
     operationId,
   ])
 }
 
+export function deleteManualOperation(database: DatabaseSync, operationId: number): void {
+  const operation = one(database, 'SELECT id, batch_id FROM operations WHERE id = ?', [operationId])
+  if (!operation) throw new LedgerError('Opération introuvable.')
+  if (operation.batch_id !== null) throw new LedgerError('Une ligne importée ne s’efface pas.')
+  const transfer = one(
+    database,
+    'SELECT id FROM transfers WHERE source_operation_id = ? OR dest_operation_id = ?',
+    [operationId, operationId],
+  )
+  if (transfer) {
+    detachTransfer(database, numberValue(transfer.id), null)
+    return
+  }
+  run(database, 'DELETE FROM operations WHERE id = ?', [operationId])
+}
+
+export function deleteTransfer(database: DatabaseSync, transferId: number): void {
+  const transfer = one(database, 'SELECT id FROM transfers WHERE id = ?', [transferId])
+  if (!transfer) throw new LedgerError('Virement introuvable.')
+  detachTransfer(database, transferId, null)
+}
+
+export function listTransfers(database: DatabaseSync, accountId: number, year: number): TransferView[] {
+  return all(
+    database,
+    `SELECT t.id, t.date, t.amount_cents,
+            t.from_account_id, fa.name AS from_name, fb.name AS from_bank,
+            t.to_account_id, ta.name AS to_name, tb.name AS to_bank
+     FROM transfers t
+     JOIN accounts fa ON fa.id = t.from_account_id
+     JOIN banks fb ON fb.id = fa.bank_id
+     JOIN accounts ta ON ta.id = t.to_account_id
+     JOIN banks tb ON tb.id = ta.bank_id
+     WHERE (t.from_account_id = ? OR t.to_account_id = ?)
+       AND t.date >= ? AND t.date <= ?
+     ORDER BY t.date, t.id`,
+    [accountId, accountId, `${year}-01-01`, `${year}-12-31`],
+  ).map((row) => ({
+    id: numberValue(row.id),
+    date: String(row.date),
+    amountCents: numberValue(row.amount_cents),
+    fromAccountId: numberValue(row.from_account_id),
+    fromAccountName: String(row.from_name),
+    fromBankName: String(row.from_bank),
+    toAccountId: numberValue(row.to_account_id),
+    toAccountName: String(row.to_name),
+    toBankName: String(row.to_bank),
+  }))
+}
+
+export function listPositions(database: DatabaseSync, accountId: number): Position[] {
+  return all(database, 'SELECT * FROM positions WHERE account_id = ? ORDER BY sort_order, id', [accountId]).map(mapPosition)
+}
+
+export function savePosition(
+  database: DatabaseSync,
+  input: { accountId: number; id?: number; name: string; quantity: string; value: string; valuedOn: string },
+): Position {
+  const account = getAccount(database, input.accountId)
+  if (account.kind !== 'titre') throw new LedgerError('Ce compte n’est pas un compte titre.')
+  const name = requiredName(input.name, 'Le nom du titre est requis.')
+  const quantity = parseQuantity(input.quantity)
+  if (quantity === null) throw new LedgerError('Le nombre de titres est requis.')
+  if (quantity === 'invalid') throw new LedgerError('Nombre illisible.')
+  const value = millisFromInput(input.value)
+  if (value < 0) throw new LedgerError('La valeur ne peut pas être négative.')
+  const valuedOn = requiredValueDate(input.valuedOn)
+  if (input.id) {
+    const existing = one(database, 'SELECT id FROM positions WHERE id = ? AND account_id = ?', [input.id, input.accountId])
+    if (!existing) throw new LedgerError('Titre introuvable.')
+    run(database, 'UPDATE positions SET name = ?, quantity_micros = ?, value_millis = ?, valued_on = ? WHERE id = ?', [
+      name,
+      quantity,
+      value,
+      valuedOn,
+      input.id,
+    ])
+    return positionById(database, input.id)
+  }
+  const order = nextOrder(
+    database,
+    'SELECT COALESCE(MAX(sort_order), 0) AS value FROM positions WHERE account_id = ?',
+    [input.accountId],
+  )
+  const id = insert(
+    database,
+    'INSERT INTO positions (account_id, name, quantity_micros, value_millis, valued_on, sort_order) VALUES (?, ?, ?, ?, ?, ?)',
+    [input.accountId, name, quantity, value, valuedOn, order],
+  )
+  return positionById(database, id)
+}
+
+export function setCash(database: DatabaseSync, accountId: number, raw: string, valuedOn: string): void {
+  const account = getAccount(database, accountId)
+  if (account.kind !== 'titre') throw new LedgerError('Ce compte n’est pas un compte titre.')
+  const value = raw.trim() === '' ? 0 : millisFromInput(raw)
+  run(database, 'UPDATE accounts SET cash_millis = ?, cash_valued_on = ? WHERE id = ?', [
+    value,
+    requiredValueDate(valuedOn),
+    accountId,
+  ])
+}
+
+export function deletePosition(database: DatabaseSync, id: number): void {
+  const existing = one(database, 'SELECT id FROM positions WHERE id = ?', [id])
+  if (!existing) throw new LedgerError('Titre introuvable.')
+  run(database, 'DELETE FROM positions WHERE id = ?', [id])
+}
+
 export function accountSummary(database: DatabaseSync, accountId: number, year: number): AccountSummary {
   const account = getAccount(database, accountId)
-  if (account.kind === 'solde') return { kind: 'solde', year, ...balanceFigures(year, balanceMap(database, accountId, year)) }
+  if (account.kind === 'titre') {
+    const positions = listPositions(database, accountId)
+    const securitiesMillis = positions.reduce(
+      (sum, position) => sum + lineMillis(position.quantityMicros, position.valueMillis),
+      0,
+    )
+    const cashMillis = account.cashMillis ?? 0
+    return {
+      kind: 'titre',
+      year,
+      positions,
+      securitiesMillis,
+      cashMillis,
+      cashValuedOn: account.cashValuedOn,
+      totalMillis: securitiesMillis + cashMillis,
+    }
+  }
+  if (account.kind === 'epargne') {
+    return { kind: 'epargne', year, ...savingsFigures(database, accountId, year) }
+  }
   const operations = all(
     database,
     'SELECT date, amount_cents, category_id FROM operations WHERE account_id = ?',
@@ -403,16 +714,24 @@ export function globalSummary(database: DatabaseSync, year: number): GlobalSumma
     year,
     accounts.map((account) => {
       const summary = accountSummary(database, account.id, year)
-      return {
+      const empty = (): (number | null)[] => Array.from({ length: 12 }, () => null)
+      const row = {
         accountId: account.id,
         accountName: account.name,
         bankId: account.bankId,
         bankName: account.bankName,
         kind: account.kind,
-        expense: summary.kind === 'releve' ? summary.expenseTotals : summary.expense,
-        income: summary.kind === 'releve' ? summary.incomeTotals : summary.income,
-        balance: summary.balances,
       }
+      if (summary.kind === 'titre') {
+        const balance = empty()
+        const now = new Date()
+        if (year === now.getFullYear()) balance[now.getMonth()] = millisToCents(summary.totalMillis)
+        return { ...row, expense: empty(), income: empty(), balance }
+      }
+      if (summary.kind === 'epargne') {
+        return { ...row, expense: summary.expense, income: summary.income, balance: summary.balances }
+      }
+      return { ...row, expense: summary.expenseTotals, income: summary.incomeTotals, balance: summary.balances }
     }),
   )
 }
@@ -548,15 +867,292 @@ function existingCounts(database: DatabaseSync, accountId: number): Map<string, 
   return counts
 }
 
-function balanceMap(database: DatabaseSync, accountId: number, year: number): Map<string, number> {
+function linkTransfer(
+  database: DatabaseSync,
+  input: {
+    fromAccountId: number
+    toAccountId: number
+    date: string
+    amountCents: number
+    sourceOperationId: number | null
+    matchedOperationId: number | null
+  },
+): void {
+  const ends = transferEnds(database, input.fromAccountId, input.toAccountId)
+  const transferId = insert(
+    database,
+    `INSERT INTO transfers (from_account_id, to_account_id, date, amount_cents, source_operation_id)
+     VALUES (?, ?, ?, ?, ?)`,
+    [input.fromAccountId, input.toAccountId, input.date, input.amountCents, input.sourceOperationId],
+  )
+  const originId = operationAccount(database, input.sourceOperationId)
+  const counterpart = [ends.from, ends.to].find((account) => account.kind === 'courant' && account.id !== originId)
+  if (!counterpart) {
+    if (input.matchedOperationId !== null) throw new LedgerError('Ce compte n’a pas de relevé.')
+    return
+  }
+  const arriving = counterpart.id === input.toAccountId
+  const other = arriving ? ends.from : ends.to
+  const amount = arriving ? input.amountCents : -input.amountCents
+  const operationId = input.matchedOperationId === null
+    ? insertCounterpart(
+        database,
+        counterpart.id,
+        input.date,
+        arriving ? `Virement de ${other.name}` : `Virement vers ${other.name}`,
+        amount,
+      )
+    : adoptMatch(database, input.matchedOperationId, counterpart.id, input.date, amount)
+  run(database, 'UPDATE transfers SET dest_operation_id = ? WHERE id = ?', [operationId, transferId])
+}
+
+function adoptMatch(database: DatabaseSync, operationId: number, accountId: number, date: string, amountCents: number): number {
+  const match = one(
+    database,
+    'SELECT id, account_id, date, amount_cents FROM operations WHERE id = ?',
+    [operationId],
+  )
+  if (
+    !match ||
+    numberValue(match.account_id) !== accountId ||
+    String(match.date) !== date ||
+    numberValue(match.amount_cents) !== amountCents
+  ) {
+    throw new LedgerError('Cette ligne ne correspond pas au virement.')
+  }
+  const used = one(
+    database,
+    'SELECT id FROM transfers WHERE source_operation_id = ? OR dest_operation_id = ?',
+    [operationId, operationId],
+  )
+  if (used) throw new LedgerError('Cette ligne est déjà liée à un virement.')
+  const categoryId = virementCategoryId(database, amountCents < 0 ? 'depense' : 'encaissement')
+  run(database, 'UPDATE operations SET category_id = ?, pointed_at = ? WHERE id = ?', [
+    categoryId,
+    new Date().toISOString(),
+    operationId,
+  ])
+  return operationId
+}
+
+function matchingLines(
+  database: DatabaseSync,
+  accountId: number,
+  date: string,
+  amountCents: number,
+  sourceOperationId: number | null,
+): TransferMatch[] {
+  const account = getAccount(database, accountId)
+  if (account.kind !== 'courant') return []
+  const keep = sourceOperationId ?? 0
+  return all(
+    database,
+    `SELECT id, date, label, amount_cents FROM operations
+     WHERE account_id = ? AND date = ? AND amount_cents = ?
+       AND id NOT IN (
+         SELECT source_operation_id FROM transfers
+         WHERE source_operation_id IS NOT NULL AND source_operation_id != ?
+         UNION
+         SELECT dest_operation_id FROM transfers
+         WHERE dest_operation_id IS NOT NULL AND (source_operation_id IS NULL OR source_operation_id != ?)
+       )
+     ORDER BY id`,
+    [accountId, date, amountCents, keep, keep],
+  ).map((row) => ({
+    id: numberValue(row.id),
+    date: String(row.date),
+    label: String(row.label),
+    amountCents: numberValue(row.amount_cents),
+  }))
+}
+
+function manualOperation(database: DatabaseSync, operationId: number): Row {
+  const operation = one(database, 'SELECT id, date, amount_cents, batch_id FROM operations WHERE id = ?', [operationId])
+  if (!operation) throw new LedgerError('Opération introuvable.')
+  if (operation.batch_id !== null) throw new LedgerError('Une ligne importée ne se modifie pas.')
+  return operation
+}
+
+function transferDate(value: string): string {
+  const text = value.trim()
+  if (!text) return todayIso()
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text)
+  if (!match || !isoDate(Number(match[1]), Number(match[2]), Number(match[3]))) {
+    throw new LedgerError('Date illisible.')
+  }
+  return text
+}
+
+function operationAccount(database: DatabaseSync, operationId: number | null): number | null {
+  if (operationId === null) return null
+  const row = one(database, 'SELECT account_id FROM operations WHERE id = ?', [operationId])
+  return row ? numberValue(row.account_id) : null
+}
+
+function insertCounterpart(database: DatabaseSync, accountId: number, date: string, label: string, amountCents: number): number {
+  const nature = amountCents < 0 ? 'depense' : 'encaissement'
+  const categoryId = virementCategoryId(database, nature)
+  return insert(
+    database,
+    `INSERT INTO operations (account_id, batch_id, date, label, amount_cents, category_id, pointed_at)
+     VALUES (?, NULL, ?, ?, ?, ?, ?)`,
+    [accountId, date, label, amountCents, categoryId, new Date().toISOString()],
+  )
+}
+
+function virementCategoryId(database: DatabaseSync, nature: Nature): number {
+  const row = one(
+    database,
+    `SELECT c.id FROM categories c
+     JOIN families f ON f.id = c.family_id
+     WHERE c.role = 'virement' AND f.nature = ? AND c.archived = 0 AND f.archived = 0`,
+    [nature],
+  )
+  if (!row) throw new LedgerError('La catégorie Virement est introuvable.')
+  return numberValue(row.id)
+}
+
+function transferEnds(database: DatabaseSync, fromAccountId: number, toAccountId: number): { from: Account; to: Account } {
+  if (fromAccountId === toAccountId) throw new LedgerError('Choisis un autre compte.')
+  const from = getAccount(database, fromAccountId)
+  const to = getAccount(database, toAccountId)
+  for (const account of [from, to]) {
+    if (account.archived) throw new LedgerError('Ce compte est archivé.')
+    if (account.kind === 'titre') throw new LedgerError('Un virement interne va vers un compte courant ou une épargne.')
+  }
+  return { from, to }
+}
+
+function savingsFigures(database: DatabaseSync, accountId: number, year: number) {
+  const account = getAccount(database, accountId)
+  const rows = savingsFlows(database, accountId, `${year}-12-31`)
+  const balances: (number | null)[] = []
+  const expense: (number | null)[] = []
+  const income: (number | null)[] = []
+  const openingCents = account.openingCents
+  const openingDate = account.openingDate
+  const hasOpening = openingCents !== null && openingDate !== null
+  for (let month = 1; month <= 12; month += 1) {
+    const end = lastDay(year, month)
+    const monthStart = `${year}-${String(month).padStart(2, '0')}-01`
+    const closed = hasOpening && monthEntirelyBefore(year, month, openingDate)
+    let incoming = 0
+    let outgoing = 0
+    let net = 0
+    if (!closed) {
+      for (const row of rows) {
+        if (hasOpening && row.date >= openingDate && row.date <= end) net += row.signed
+        if (row.date >= monthStart && row.date <= end && (!hasOpening || row.date >= openingDate)) {
+          if (row.signed > 0) incoming += row.signed
+          if (row.signed < 0) outgoing += -row.signed
+        }
+      }
+    }
+    balances.push(!hasOpening || closed ? null : openingCents + net)
+    expense.push(outgoing > 0 ? outgoing : null)
+    income.push(incoming > 0 ? incoming : null)
+  }
+  return {
+    balances,
+    entered: Array.from({ length: 12 }, () => null),
+    expense,
+    income,
+  }
+}
+
+function savingsBalanceAsOf(database: DatabaseSync, accountId: number, asOf: string): number | null {
+  const account = getAccount(database, accountId)
+  if (account.openingCents === null || account.openingDate === null || asOf < account.openingDate) return null
+  let net = 0
+  for (const row of savingsFlows(database, accountId, asOf)) {
+    if (row.date < account.openingDate || row.date > asOf) continue
+    net += row.signed
+  }
+  return account.openingCents + net
+}
+
+function savingsFlows(database: DatabaseSync, accountId: number, until: string): { date: string; signed: number }[] {
+  const flows = savingsTransfers(database, accountId, until).map((row) => {
+    const amount = numberValue(row.amount_cents)
+    let signed = 0
+    if (numberValue(row.to_account_id) === accountId) signed += amount
+    if (numberValue(row.from_account_id) === accountId) signed -= amount
+    return { date: String(row.date), signed }
+  })
+  for (const row of all(
+    database,
+    'SELECT date, amount_cents FROM operations WHERE account_id = ? AND date <= ?',
+    [accountId, until],
+  )) {
+    flows.push({ date: String(row.date), signed: numberValue(row.amount_cents) })
+  }
+  return flows
+}
+
+function savingsTransfers(database: DatabaseSync, accountId: number, until: string): Row[] {
+  return all(
+    database,
+    `SELECT date, amount_cents, from_account_id, to_account_id FROM transfers
+     WHERE (from_account_id = ? OR to_account_id = ?) AND date <= ?`,
+    [accountId, accountId, until],
+  )
+}
+
+function detachTransfers(database: DatabaseSync, accountId: number): void {
   const rows = all(
     database,
-    'SELECT month, amount_cents FROM monthly_balances WHERE account_id = ? AND month >= ? AND month <= ?',
-    [accountId, monthKey(year - 1, 12), monthKey(year, 12)],
+    'SELECT id FROM transfers WHERE from_account_id = ? OR to_account_id = ?',
+    [accountId, accountId],
   )
-  const balances = new Map<string, number>()
-  for (const row of rows) balances.set(String(row.month), numberValue(row.amount_cents))
-  return balances
+  for (const row of rows) detachTransfer(database, numberValue(row.id), accountId)
+}
+
+function detachOperation(database: DatabaseSync, operationId: number, keepOperationId: number | null = null): void {
+  const transfer = one(
+    database,
+    'SELECT id FROM transfers WHERE source_operation_id = ? OR dest_operation_id = ?',
+    [operationId, operationId],
+  )
+  if (transfer) detachTransfer(database, numberValue(transfer.id), null, keepOperationId)
+}
+
+function detachTransfer(
+  database: DatabaseSync,
+  transferId: number,
+  keepAccountId: number | null,
+  keepOperationId: number | null = null,
+): void {
+  const transfer = one(
+    database,
+    'SELECT source_operation_id, dest_operation_id FROM transfers WHERE id = ?',
+    [transferId],
+  )
+  if (!transfer) return
+  const sourceId = transfer.source_operation_id === null ? null : numberValue(transfer.source_operation_id)
+  const destId = transfer.dest_operation_id === null ? null : numberValue(transfer.dest_operation_id)
+  run(database, 'DELETE FROM transfers WHERE id = ?', [transferId])
+  if (destId !== null && destId !== keepOperationId) {
+    const operation = one(database, 'SELECT account_id, batch_id FROM operations WHERE id = ?', [destId])
+    if (operation && (keepAccountId === null || numberValue(operation.account_id) !== keepAccountId)) {
+      if (operation.batch_id === null) run(database, 'DELETE FROM operations WHERE id = ?', [destId])
+      else run(database, 'UPDATE operations SET category_id = NULL, pointed_at = NULL WHERE id = ?', [destId])
+    }
+  }
+  if (sourceId !== null) {
+    const operation = one(database, 'SELECT account_id FROM operations WHERE id = ?', [sourceId])
+    if (operation && numberValue(operation.account_id) !== keepAccountId) {
+      run(database, 'UPDATE operations SET category_id = NULL, pointed_at = NULL WHERE id = ?', [sourceId])
+    }
+  }
+}
+
+function assertAccountName(database: DatabaseSync, name: string, bankId: number, exceptId?: number): void {
+  const existing = one(database, 'SELECT id FROM accounts WHERE name = ? AND bank_id = ? AND id != ?', [
+    name,
+    bankId,
+    exceptId ?? 0,
+  ])
+  if (existing) throw new LedgerError('Ce compte existe déjà dans cette banque.')
 }
 
 function ensureBank(database: DatabaseSync, bankName: string): number {
@@ -612,14 +1208,46 @@ function requiredName(value: string, message: string): string {
   return name
 }
 
+function requiredValueDate(value: string): string {
+  const text = value.trim()
+  if (!text) return todayIso()
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text)
+  if (!match || !isoDate(Number(match[1]), Number(match[2]), Number(match[3]))) {
+    throw new LedgerError('Date de valeur illisible.')
+  }
+  return text
+}
+
 function isDateFormat(value: string): value is DateFormat {
   return ['JJ/MM/AAAA', 'AAAA-MM-JJ', 'JJ-MM-AAAA', 'JJ.MM.AAAA'].includes(value)
 }
 
 function accountSelect(): string {
   return `SELECT a.id, a.name, a.bank_id, b.name AS bank_name, a.kind, a.archived,
-            a.mapping_json, a.opening_cents, a.opening_date
+            a.mapping_json, a.opening_cents, a.opening_date, a.cash_millis, a.cash_valued_on
      FROM accounts a JOIN banks b ON b.id = a.bank_id`
+}
+
+function accountKind(value: unknown): AccountKind {
+  if (value === 'epargne' || value === 'titre') return value
+  return 'courant'
+}
+
+function mapPosition(row: Row): Position {
+  return {
+    id: numberValue(row.id),
+    accountId: numberValue(row.account_id),
+    name: String(row.name),
+    quantityMicros: numberValue(row.quantity_micros),
+    valueMillis: numberValue(row.value_millis),
+    valuedOn: row.valued_on === null ? null : String(row.valued_on),
+  }
+}
+
+function positionById(database: DatabaseSync, id: number): Position {
+  const row = one(database, 'SELECT * FROM positions WHERE id = ?', [id])
+  if (!row) throw new LedgerError('Titre introuvable.')
+  return mapPosition(row)
 }
 
 function mapAccount(row: Row): Account {
@@ -628,11 +1256,13 @@ function mapAccount(row: Row): Account {
     name: String(row.name),
     bankId: numberValue(row.bank_id),
     bankName: String(row.bank_name),
-    kind: row.kind === 'solde' ? 'solde' : 'releve',
+    kind: accountKind(row.kind),
     archived: numberValue(row.archived) === 1,
     mapping: row.mapping_json ? (JSON.parse(String(row.mapping_json)) as Mapping) : null,
     openingCents: row.opening_cents === null ? null : numberValue(row.opening_cents),
     openingDate: row.opening_date === null ? null : String(row.opening_date),
+    cashMillis: row.cash_millis === null ? null : numberValue(row.cash_millis),
+    cashValuedOn: row.cash_valued_on === null ? null : String(row.cash_valued_on),
   }
 }
 
@@ -654,6 +1284,7 @@ function mapCategory(row: Row): Category {
     name: String(row.name),
     sortOrder: numberValue(row.sort_order),
     archived: numberValue(row.archived) === 1,
+    role: row.role === 'virement' ? 'virement' : null,
   }
 }
 
@@ -665,6 +1296,9 @@ function mapOperation(row: Row): OperationView {
     amountCents: numberValue(row.amount_cents),
     categoryId: row.category_id === null ? null : numberValue(row.category_id),
     categoryName: row.category_name === null ? null : String(row.category_name),
+    counterpartyAccountId: row.counterparty_id === null || row.counterparty_id === undefined ? null : numberValue(row.counterparty_id),
+    counterpartyAccountName: row.counterparty_name === null || row.counterparty_name === undefined ? null : String(row.counterparty_name),
+    imported: row.batch_id !== null && row.batch_id !== undefined,
   }
 }
 
@@ -762,4 +1396,25 @@ export function centsFromInput(raw: string): number | null {
   const parsed = parseUserAmount(raw)
   if (parsed === 'invalid') throw new LedgerError('Montant illisible.')
   return parsed
+}
+
+function millisFromInput(raw: string): number {
+  const parsed = parseUserMillis(raw)
+  if (parsed === 'invalid') throw new LedgerError('Montant illisible.')
+  if (parsed === null) throw new LedgerError('La valeur est requise.')
+  return parsed
+}
+
+function securitiesBalance(database: DatabaseSync, accountId: number): number {
+  return listPositions(database, accountId).reduce(
+    (sum, position) => sum + lineMillis(position.quantityMicros, position.valueMillis),
+    0,
+  )
+}
+
+function millisToCents(millis: number): number {
+  const negative = millis < 0
+  const absolute = Math.abs(millis)
+  const cents = Math.floor(absolute / 10) + (absolute % 10 >= 5 ? 1 : 0)
+  return negative ? -cents : cents
 }

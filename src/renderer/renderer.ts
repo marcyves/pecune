@@ -1,4 +1,6 @@
-import { MONTH_LABELS, formatEuros, formatInputAmount, formatIsoDate } from '../format.ts'
+import { MONTH_LABELS, formatEuros, formatInputAmount, formatInputMillis, formatIsoDate, formatMillis } from '../format.ts'
+import { todayIso } from '../dates.ts'
+import { formatQuantity, lineMillis } from '../money.ts'
 import type {
   Account,
   AccountSummary,
@@ -7,11 +9,15 @@ import type {
   CategoryRow,
   Family,
   GlobalSummary,
+  HoldingsSummary,
   Mapping,
   Nature,
   OperationView,
+  Position,
   Preview,
   StatementSummary,
+  TransferMatch,
+  TransferView,
   UnpointedView,
 } from '../types.ts'
 
@@ -22,6 +28,7 @@ type Status = { state: 'setup' } | { state: 'error'; message: string } | { state
 type AccountCard = Account & {
   currentCents: number | null
   unpointedCents: number | null
+  securitiesMillis: number | null
 }
 
 type Workspace = {
@@ -37,6 +44,7 @@ type Detail = {
   summary: AccountSummary
   operations: OperationView[]
   batches: BatchView[]
+  transfers: TransferView[]
 }
 
 type Screen = 'global' | 'accounts' | 'account' | 'pointing' | 'categories'
@@ -50,17 +58,53 @@ type ComptesApi = {
   workspace: (year: number) => Promise<Result<Workspace>>
   accountDetail: (id: number, year: number) => Promise<Result<Detail>>
   saveAccount: (input: unknown) => Promise<Result<Account>>
+  deleteAccount: (id: number) => Promise<Result<unknown>>
   saveFamily: (input: unknown) => Promise<Result<unknown>>
   moveFamily: (id: number, direction: -1 | 1) => Promise<Result<unknown>>
   saveCategory: (input: unknown) => Promise<Result<unknown>>
   moveCategory: (id: number, direction: -1 | 1) => Promise<Result<unknown>>
   setMonthlyBalance: (accountId: number, month: string, raw: string) => Promise<Result<unknown>>
+  savePosition: (input: {
+    accountId: number
+    id?: number
+    name: string
+    quantity: string
+    value: string
+    valuedOn: string
+  }) => Promise<Result<Position>>
+  deletePosition: (id: number) => Promise<Result<unknown>>
+  setCash: (accountId: number, raw: string, valuedOn: string) => Promise<Result<unknown>>
   pickImportFile: () => Promise<Result<string | null>>
   previewImport: (accountId: number, filePath: string, sheetName?: string) => Promise<Result<Preview>>
   confirmImport: (accountId: number, filePath: string, sheetName?: string) => Promise<Result<unknown>>
   cancelBatch: (batchId: number) => Promise<Result<number>>
   unpointed: (accountId: number | null) => Promise<Result<UnpointedView[]>>
-  pointOperation: (operationId: number, categoryId: number) => Promise<Result<unknown>>
+  previewOperationTransfer: (operationId: number, counterpartyAccountId: number) => Promise<Result<TransferMatch[]>>
+  previewSavingsTransfer: (toAccountId: number, date: string, amount: string) => Promise<Result<TransferMatch[]>>
+  pointOperation: (
+    operationId: number,
+    categoryId: number,
+    counterpartyAccountId: number | null,
+    matchedOperationId: number | null,
+  ) => Promise<Result<unknown>>
+  createSavingsMovement: (
+    accountId: number,
+    date: string,
+    label: string,
+    amount: string,
+    direction: 'entree' | 'sortie',
+  ) => Promise<Result<unknown>>
+  createTransfer: (
+    fromAccountId: number,
+    toAccountId: number,
+    date: string,
+    amount: string,
+    matchedOperationId: number | null,
+  ) => Promise<Result<unknown>>
+  deleteTransfer: (transferId: number) => Promise<Result<unknown>>
+  unpointOperation: (operationId: number) => Promise<Result<unknown>>
+  updateManualOperation: (operationId: number, date: string, label: string, amount: string) => Promise<Result<unknown>>
+  deleteManualOperation: (operationId: number) => Promise<Result<unknown>>
 }
 
 declare global {
@@ -75,12 +119,15 @@ let year = new Date().getFullYear()
 let screen: Screen = 'global'
 let accountId: number | null = null
 let editing = false
+let draftBank: string | null = null
 let showArchived = false
 let status: Status = { state: 'setup' }
 let workspace: Workspace | null = null
 let detail: Detail | null = null
 let unpointed: UnpointedView[] = []
 let pointFilter: number | null = null
+let editingOperationId: number | null = null
+let globalView: 'balance' | 'expense' | 'income' = 'balance'
 let notice = ''
 let importFile: string | null = null
 let importSheet = ''
@@ -94,6 +141,16 @@ type Drill = {
 }
 
 let drill: Drill | null = null
+let writes: Promise<void> = Promise.resolve()
+
+function follow(work: () => Promise<void>): Promise<void> {
+  const run = writes.then(work, work)
+  writes = run.then(
+    () => undefined,
+    () => undefined,
+  )
+  return run
+}
 
 const app = document.querySelector('#app') as HTMLElement
 
@@ -148,6 +205,7 @@ async function ask<T>(run: Promise<Result<T>>): Promise<T | null> {
 }
 
 function render(): void {
+  const kept = app.querySelector('.pointing') ? scrollPosition() : null
   app.replaceChildren()
   if (status.state !== 'ready') {
     app.append(setupScreen())
@@ -157,6 +215,27 @@ function render(): void {
   shell.append(sidebar(), main())
   app.append(shell)
   if (screen === 'account' && drill) app.append(drillPanel())
+  if (kept && screen === 'pointing') restoreScroll(kept)
+}
+
+function scrollPosition(): { main: number; table: number; tableLeft: number } {
+  const region = app.querySelector('.main')
+  const table = app.querySelector('.pointing .table-wrap')
+  return {
+    main: region instanceof HTMLElement ? region.scrollTop : 0,
+    table: table instanceof HTMLElement ? table.scrollTop : 0,
+    tableLeft: table instanceof HTMLElement ? table.scrollLeft : 0,
+  }
+}
+
+function restoreScroll(kept: { main: number; table: number; tableLeft: number }): void {
+  const region = app.querySelector('.main')
+  const table = app.querySelector('.pointing .table-wrap')
+  if (region instanceof HTMLElement) region.scrollTop = kept.main
+  if (table instanceof HTMLElement) {
+    table.scrollTop = kept.table
+    table.scrollLeft = kept.tableLeft
+  }
 }
 
 function setupScreen(): HTMLElement {
@@ -237,19 +316,25 @@ function main(): HTMLElement {
 function renderGlobal(global: GlobalSummary): HTMLElement {
   const page = el('div')
   page.append(el('h1', '', `Tableau global ${year}`))
-  page.append(moneyBlock('Dépenses', global, 'expense'))
-  page.append(moneyBlock('Encaissements', global, 'income'))
-  page.append(moneyBlock('Soldes', global, 'balance'))
+  const tabs = el('div', 'tabs')
+  for (const [field, label] of [
+    ['balance', 'Soldes'],
+    ['expense', 'Dépenses'],
+    ['income', 'Encaissements'],
+  ] as const) {
+    tabs.append(
+      button(label, globalView === field ? 'active' : '', () => {
+        globalView = field
+        render()
+      }),
+    )
+  }
+  page.append(tabs, moneyBlock(global, globalView))
   return page
 }
 
-function moneyBlock(
-  title: string,
-  global: GlobalSummary,
-  field: 'expense' | 'income' | 'balance',
-): HTMLElement {
+function moneyBlock(global: GlobalSummary, field: 'expense' | 'income' | 'balance'): HTMLElement {
   const card = el('section', 'card')
-  card.append(el('h2', '', title))
   if (global.banks.length === 0) {
     card.append(el('p', 'empty', 'Aucun compte.'))
     return card
@@ -277,13 +362,7 @@ function renderAccounts(): HTMLElement {
   page.append(el('h1', '', 'Comptes'))
   const tools = el('div', 'toolbar')
   tools.append(
-    button('Nouveau compte', 'primary', () => {
-      accountId = null
-      editing = true
-      detail = null
-      screen = 'account'
-      render()
-    }),
+    button('Nouveau compte', 'primary', () => startNewAccount(null)),
     button(showArchived ? 'Masquer les archivés' : 'Afficher les archivés', '', () => {
       showArchived = !showArchived
       render()
@@ -292,28 +371,47 @@ function renderAccounts(): HTMLElement {
   page.append(tools)
   const accounts = (workspace?.accounts ?? []).filter((account) => showArchived || !account.archived)
   if (accounts.length === 0) page.append(el('p', 'empty', 'Aucun compte pour l’instant.'))
-  let bank = ''
-  let row: HTMLElement | null = null
-  const list = el('div', 'account-list')
+  const groups = new Map<string, AccountCard[]>()
   for (const account of accounts) {
-    if (account.bankName !== bank) {
-      bank = account.bankName
-      const group = el('section')
-      group.append(el('h2', '', bank))
-      row = el('div', 'account-bank')
-      group.append(row)
-      list.append(group)
+    const items = groups.get(account.bankName) ?? []
+    items.push(account)
+    groups.set(account.bankName, items)
+  }
+  if (groups.size > 1) page.append(totalLine('Tous les comptes', accounts))
+  const list = el('div', 'account-list')
+  for (const [bankName, items] of groups) {
+    const group = el('section')
+    const head = el('div', 'bank-head')
+    head.append(el('h2', '', bankName), plusButton('Nouveau compte', () => startNewAccount(bankName)), totalLine('Solde', items))
+    const row = el('div', 'account-bank')
+    group.append(head, row)
+    list.append(group)
+    for (const account of items) {
+      const card = button('', 'account-card', () => openAccount(account.id))
+      const top = el('div', 'account-card-top')
+      top.append(el('strong', '', account.name), el('span', 'muted', kindLabel(account.kind)))
+      const figures = el('div', 'account-figures')
+      if (account.kind === 'titre') {
+        const securities = account.securitiesMillis
+        const global = securities === null ? null : securities + (account.cashMillis ?? 0)
+        figures.append(figureMillis('Solde des titres', securities), figureMillis('Solde global', global))
+      } else {
+        figures.append(figure('Solde courant', account.currentCents), figure('Solde non pointé', account.unpointedCents))
+      }
+      card.append(top, figures)
+      row.append(card)
     }
-    const card = button('', 'account-card', () => openAccount(account.id))
-    const head = el('div', 'account-card-top')
-    head.append(el('strong', '', account.name), el('span', 'muted', account.kind === 'releve' ? 'Relevé' : 'Solde'))
-    const figures = el('div', 'account-figures')
-    figures.append(figure('Solde courant', account.currentCents), figure('Solde non pointé', account.unpointedCents))
-    card.append(head, figures)
-    row?.append(card)
   }
   page.append(list)
   return page
+}
+
+function totalLine(label: string, accounts: AccountCard[]): HTMLElement {
+  const known = accounts.some((account) => account.currentCents !== null)
+  const cents = accounts.reduce((sum, account) => sum + (account.currentCents ?? 0), 0)
+  const text = known ? `${label} ${formatEuros(cents)}` : `${label} —`
+  const className = label === 'Tous les comptes' ? 'accounts-total' : 'bank-total'
+  return el('span', `${className}${known && cents < 0 ? ' neg' : ''}`, text)
 }
 
 function renderAccount(): HTMLElement {
@@ -321,6 +419,7 @@ function renderAccount(): HTMLElement {
   const account = detail?.account ?? null
   const creating = editing && !account
   page.append(el('h1', '', creating ? 'Nouveau compte' : (account?.name ?? 'Compte')))
+  if (account) page.append(el('p', 'muted', account.bankName))
   page.append(button('Retour aux comptes', 'link', () => go('accounts')))
   if (creating || editing) page.append(accountForm(account))
   if (!account || !detail) return page
@@ -329,13 +428,16 @@ function renderAccount(): HTMLElement {
   tools.append(
     button(account.archived ? 'Réactiver' : 'Archiver', 'danger', () => archiveAccount(account)),
   )
-  if (account.kind === 'releve') tools.append(button('Importer un relevé', 'primary', () => startImport(account.id)))
+  if (account.archived) {
+    tools.append(button('Effacer', 'danger', () => eraseAccount(account)))
+  }
+  if (account.kind === 'courant') tools.append(button('Importer un relevé', 'primary', () => startImport(account.id)))
   page.append(tools)
   if (preview && importFile) page.append(renderPreview(account.id))
   page.append(renderSummary(detail.summary, account))
-  if (account.kind === 'releve') {
+  if (account.kind === 'courant') {
     page.append(renderBatches(detail.batches))
-    page.append(renderOperations(detail.operations))
+    page.append(renderOperations(detail.operations, account.id))
   }
   return page
 }
@@ -345,11 +447,34 @@ function accountForm(account: Account | null): HTMLElement {
   const mapping = account?.mapping
   form.append(el('h2', '', account ? 'Modifier le compte' : 'Nouveau compte'))
   const name = field('Nom', 'text', account?.name ?? '')
-  const bank = field('Banque', 'text', account?.bankName ?? '')
-  form.append(el('div', 'form-row', name.label, bank.label))
+  const lockedBank = !account && draftBank ? draftBank : null
+  let readBank: () => string
+  if (lockedBank) {
+    const fixed = el('div', 'fixed-bank')
+    fixed.append(el('span', 'muted', 'Banque'), el('strong', '', lockedBank))
+    form.append(el('div', 'form-row', name.label, fixed))
+    readBank = () => lockedBank
+  } else {
+    const banks = knownBanks()
+    const currentBank = account?.bankName ?? (banks[0] ?? '')
+    const bankSelect = el('select') as HTMLSelectElement
+    for (const bankName of banks) bankSelect.append(option(bankName, bankName))
+    bankSelect.append(option('', 'Nouvelle banque'))
+    bankSelect.value = banks.includes(currentBank) ? currentBank : ''
+    const bankInput = textInput(banks.includes(currentBank) ? '' : currentBank)
+    const newBank = el('label', '', 'Nouvelle banque')
+    newBank.append(bankInput)
+    const syncBank = () => {
+      newBank.hidden = bankSelect.value !== ''
+    }
+    bankSelect.addEventListener('change', syncBank)
+    syncBank()
+    form.append(el('div', 'form-row', name.label, labeled('Banque', bankSelect), newBank))
+    readBank = () => bankSelect.value || bankInput.value
+  }
   const kind = el('select') as HTMLSelectElement
-  kind.append(option('releve', 'Relevé'), option('solde', 'Solde mensuel'))
-  kind.value = account?.kind ?? 'releve'
+  kind.append(option('courant', 'Courant'), option('epargne', 'Épargne'), option('titre', 'Titre'))
+  kind.value = account?.kind ?? 'courant'
   kind.disabled = Boolean(account)
   const kindLabel = el('label', '', 'Type')
   kindLabel.append(kind)
@@ -370,7 +495,7 @@ function accountForm(account: Account | null): HTMLElement {
   const debitHeader = field('Colonne débit', 'text', mapping?.mode === 'debit-credit' ? mapping.debitHeader : 'Debit')
   const creditHeader = field('Colonne crédit', 'text', mapping?.mode === 'debit-credit' ? mapping.creditHeader : 'Credit')
   const openingAmount = field(
-    'Solde d’ouverture',
+    'Solde initial',
     'text',
     account?.openingCents === null || account?.openingCents === undefined ? '' : formatInputAmount(account.openingCents),
   )
@@ -384,26 +509,27 @@ function accountForm(account: Account | null): HTMLElement {
     amountHeader.label,
     debitHeader.label,
     creditHeader.label,
-    openingAmount.label,
-    openingDate.label,
   )
-  form.append(mappingBox)
+  const openingBox = el('div', 'form-row')
+  openingBox.append(openingAmount.label, openingDate.label)
+  form.append(mappingBox, openingBox)
   const sync = () => {
-    const releve = kind.value === 'releve'
-    mappingBox.hidden = !releve
+    const courant = kind.value === 'courant'
+    mappingBox.hidden = !courant
+    openingBox.hidden = kind.value === 'titre'
   }
   kind.addEventListener('change', sync)
   sync()
   form.append(
     button(account ? 'Enregistrer' : 'Créer', 'primary', async () => {
-      const releve = kind.value === 'releve'
+      const courant = kind.value === 'courant'
       const payload = {
         id: account?.id,
         name: name.input.value,
-        bankName: bank.input.value,
+        bankName: readBank(),
         kind: kind.value,
         archived: account?.archived ?? false,
-        mapping: releve
+        mapping: courant
           ? ({
               dateHeader: dateHeader.input.value,
               labelHeader: labelHeader.input.value,
@@ -424,6 +550,7 @@ function accountForm(account: Account | null): HTMLElement {
         return
       }
       editing = false
+      draftBank = null
       accountId = saved.id
       screen = 'account'
       notice = 'Compte enregistré.'
@@ -436,8 +563,150 @@ function accountForm(account: Account | null): HTMLElement {
 }
 
 function renderSummary(summary: AccountSummary, account: Account): HTMLElement {
-  if (summary.kind === 'solde') return balanceEditor(account, summary)
+  if (summary.kind === 'epargne') {
+    const page = el('div')
+    page.append(balanceEditor(account, summary), movementEditor(account), transferEditor(account))
+    return page
+  }
+  if (summary.kind === 'titre') return holdingsEditor(account, summary)
   return statementView(summary)
+}
+
+function holdingsEditor(account: Account, summary: HoldingsSummary): HTMLElement {
+  const card = el('section', 'card')
+  card.append(el('h2', '', 'Titres'))
+  if (summary.positions.length === 0) card.append(el('p', 'empty', 'Aucun titre pour l’instant.'))
+  const table = el('table', 'grid holdings')
+  const head = el('tr')
+  head.append(
+    el('th', '', 'Nom'),
+    el('th', 'num', 'Nombre'),
+    el('th', 'num', 'Valeur'),
+    el('th', 'num', 'Montant'),
+    el('th', '', 'Date de valeur'),
+    el('th'),
+  )
+  table.append(head)
+  for (const position of summary.positions) {
+    const name = textInput(position.name)
+    const quantity = textInput(formatQuantity(position.quantityMicros))
+    const value = amountInput(formatInputMillis(position.valueMillis))
+    const valuedOn = dateInput(position.valuedOn || todayIso())
+    const actions = el('div', 'toolbar')
+    actions.append(
+      button('Enregistrer', '', () => {
+        void persistPosition(account.id, position.id, name.value, quantity.value, value.value, valuedOn.value)
+      }),
+      button('Retirer', 'danger', () => {
+        void removePosition(position)
+      }),
+    )
+    const row = el('tr')
+    row.append(
+      cell(name),
+      cell(quantity),
+      cell(value),
+      millisCell(lineMillis(position.quantityMicros, position.valueMillis)),
+      cell(valuedOn),
+      cell(actions),
+    )
+    table.append(row)
+  }
+  const cash = amountInput(formatInputMillis(summary.cashMillis))
+  const cashDate = dateInput(summary.cashValuedOn || todayIso())
+  const cashActions = el('div', 'toolbar')
+  cashActions.append(
+    button('Enregistrer', '', () => {
+      void persistCash(account.id, cash.value, cashDate.value)
+    }),
+  )
+  const cashRow = el('tr')
+  cashRow.append(el('td', '', 'Disponible au comptant'), el('td'), el('td'), cell(cash), cell(cashDate), cell(cashActions))
+  table.append(cashRow)
+  table.append(holdingTotal('Solde des titres', summary.securitiesMillis))
+  table.append(holdingTotal('Solde global', summary.totalMillis))
+  card.append(wrap(table))
+  const name = field('Nom', 'text', '')
+  name.input.placeholder = 'Nom du titre'
+  const quantity = field('Nombre', 'text', '')
+  const value = field('Valeur', 'text', '')
+  value.input.className = 'amount'
+  value.input.placeholder = '0,000'
+  value.input.inputMode = 'decimal'
+  value.input.addEventListener('focus', () => value.input.select())
+  const valuedOn = field('Date de valeur', 'date', todayIso())
+  const add = el('div', 'form-row')
+  add.append(
+    name.label,
+    quantity.label,
+    value.label,
+    valuedOn.label,
+    button('Ajouter', 'primary', () => {
+      void persistPosition(
+        account.id,
+        undefined,
+        name.input.value,
+        quantity.input.value,
+        value.input.value,
+        valuedOn.input.value,
+      )
+    }),
+  )
+  card.append(add)
+  return card
+}
+
+function holdingTotal(label: string, millis: number): HTMLElement {
+  const row = el('tr', 'total')
+  row.append(el('td', '', label), el('td'), el('td'), millisCell(millis), el('td'), el('td'))
+  return row
+}
+
+async function persistCash(accountId: number, raw: string, valuedOn: string): Promise<void> {
+  await follow(async () => {
+    const saved = await ask(window.comptes.setCash(accountId, raw, valuedOn))
+    if (saved === null) {
+      render()
+      return
+    }
+    notice = 'Disponible enregistré.'
+    await loadWorkspace()
+    render()
+  })
+}
+
+async function persistPosition(
+  accountId: number,
+  id: number | undefined,
+  name: string,
+  quantity: string,
+  value: string,
+  valuedOn: string,
+): Promise<void> {
+  await follow(async () => {
+    const saved = await ask(window.comptes.savePosition({ accountId, id, name, quantity, value, valuedOn }))
+    if (!saved) {
+      render()
+      return
+    }
+    notice = 'Titre enregistré.'
+    await loadWorkspace()
+    render()
+  })
+}
+
+async function removePosition(position: Position): Promise<void> {
+  if (!confirm(`Retirer ${position.name} ?`)) return
+  await follow(async () => {
+    const removed = await ask(window.comptes.deletePosition(position.id))
+    if (removed === null) {
+      render()
+      return
+    }
+    notice = 'Titre retiré.'
+    await loadWorkspace()
+    render()
+  })
 }
 
 function statementView(summary: StatementSummary): HTMLElement {
@@ -581,30 +850,199 @@ function operationsForDrill(): OperationView[] {
 function balanceEditor(account: Account, summary: BalanceSummary): HTMLElement {
   const card = el('section', 'card')
   card.append(el('h2', '', `Soldes ${year}`))
-  card.append(el('p', 'muted', 'Saisis le solde de fin de mois. Le mouvement est calculé.'))
+  card.append(el('p', 'muted', 'Le solde de fin de mois part du solde initial, des mouvements et des virements.'))
+  if (account.openingCents === null || !account.openingDate) {
+    card.append(el('p', 'banner', 'Solde initial manquant. Les soldes ne sont pas calculés.'))
+  }
+  const amount = amountInput(account.openingCents === null ? '' : formatInputAmount(account.openingCents))
+  const date = dateInput(account.openingDate ?? '')
+  const form = el('div', 'form-row')
+  form.append(labeled('Solde initial', amount), labeled('Date', date))
+  card.append(form)
+  card.append(
+    button('Enregistrer', 'primary', () => {
+      void saveOpening(account, amount.value, date.value)
+    }),
+  )
   const table = el('table', 'grid')
   table.append(monthHead())
-  const balanceRow = labelRow('Solde saisi', '')
-  const expenseRow = amountRow('Dépense', summary.expense, '')
-  const incomeRow = amountRow('Encaissement', summary.income, '')
-  summary.balances.forEach((value, index) => {
-    const month = `${year}-${String(index + 1).padStart(2, '0')}`
-    const input = document.createElement('input')
-    input.value = value === null ? '' : formatInputAmount(value)
-    input.addEventListener('change', async () => {
-      const saved = await ask(window.comptes.setMonthlyBalance(account.id, month, input.value))
-      if (saved !== null) {
-        await loadDetail()
-        render()
-      }
-    })
-    const cell = el('td', 'num')
-    cell.append(input)
-    balanceRow.append(cell)
-  })
-  table.append(balanceRow, expenseRow, incomeRow)
+  table.append(
+    amountRow('Solde', summary.balances, ''),
+    amountRow('Dépense', summary.expense, ''),
+    amountRow('Encaissement', summary.income, ''),
+  )
   card.append(wrap(table))
   return card
+}
+
+async function saveOpening(account: Account, amount: string, date: string): Promise<void> {
+  const saved = await ask(
+    window.comptes.saveAccount({
+      id: account.id,
+      name: account.name,
+      bankName: account.bankName,
+      kind: account.kind,
+      archived: account.archived,
+      mapping: account.mapping,
+      openingAmount: amount,
+      openingDate: date,
+    }),
+  )
+  if (!saved) {
+    render()
+    return
+  }
+  notice = 'Solde initial enregistré.'
+  await loadWorkspace()
+  if (screen !== 'account') return
+  await loadDetail()
+  render()
+}
+
+function movementEditor(account: Account): HTMLElement {
+  const card = el('section', 'card')
+  card.append(el('h2', '', 'Mouvements'))
+  card.append(el('p', 'muted', 'Intérêts, versement ou retrait. Le solde est recalculé.'))
+  const date = dateInput(todayIso())
+  const label = textInput('')
+  label.placeholder = 'Libellé'
+  const amount = amountInput('')
+  amount.placeholder = '0,00'
+  const direction = el('select') as HTMLSelectElement
+  direction.append(option('entree', 'Entrée'), option('sortie', 'Sortie'))
+  const form = el('div', 'form-row')
+  form.append(labeled('Date', date), labeled('Libellé', label), labeled('Montant', amount), labeled('Sens', direction))
+  card.append(form)
+  card.append(
+    button('Ajouter', 'primary', () => {
+      void addMovement(account.id, date.value, label.value, amount.value, direction.value === 'sortie' ? 'sortie' : 'entree')
+    }),
+  )
+  const operations = detail?.operations ?? []
+  if (operations.length === 0) card.append(el('p', 'empty', 'Aucun mouvement cette année.'))
+  else card.append(movementTable(operations))
+  return card
+}
+
+async function addMovement(
+  accountId: number,
+  date: string,
+  label: string,
+  amount: string,
+  direction: 'entree' | 'sortie',
+): Promise<void> {
+  const saved = await ask(window.comptes.createSavingsMovement(accountId, date, label, amount, direction))
+  if (saved === null) {
+    render()
+    return
+  }
+  notice = 'Mouvement enregistré.'
+  await loadWorkspace()
+  if (screen !== 'account') return
+  await loadDetail()
+  render()
+}
+
+function movementTable(operations: OperationView[]): HTMLElement {
+  const table = el('table', 'grid')
+  const head = el('tr')
+  for (const label of ['Date', 'Libellé', 'Montant', '']) head.append(el('th', label === 'Montant' ? 'num' : '', label))
+  table.append(head)
+  for (const operation of operations) {
+    const row = el('tr')
+    if (editingOperationId === operation.id) {
+      const date = dateInput(operation.date)
+      const label = textInput(operation.label)
+      const amount = amountInput(formatInputAmount(operation.amountCents))
+      row.append(cell(date), cell(label), cell(amount), operationActions(operation, { date, label, amount }))
+    } else {
+      row.append(el('td', '', formatIsoDate(operation.date)), el('td', '', operation.label), moneyCell(operation.amountCents))
+      row.append(operationActions(operation))
+    }
+    table.append(row)
+  }
+  return wrap(table)
+}
+
+function transferEditor(account: Account): HTMLElement {
+  const card = el('section', 'card')
+  card.append(el('h2', '', 'Virements'))
+  card.append(el('p', 'muted', 'Sortie vers un autre compte. Le destinataire reçoit le mouvement, et le solde affiché est recalculé.'))
+  const targets = transferTargets(account.id)
+  const date = dateInput(todayIso())
+  const amount = amountInput('')
+  amount.placeholder = '0,00'
+  const target = el('select') as HTMLSelectElement
+  target.append(option('', 'Choisir'))
+  for (const item of targets) target.append(option(String(item.id), `${item.name} · ${item.bankName}`))
+  const form = el('div', 'form-row')
+  form.append(labeled('Date', date), labeled('Montant', amount), labeled('Vers le compte', target))
+  card.append(form)
+  card.append(
+    button('Virer', 'primary', async () => {
+      if (!target.value) {
+        notice = 'Choisis le compte du virement.'
+        render()
+        return
+      }
+      const matches = await ask(window.comptes.previewSavingsTransfer(Number(target.value), date.value, amount.value))
+      if (matches === null) {
+        render()
+        return
+      }
+      const matched = await chooseTransferMatch(target.selectedOptions[0]?.textContent ?? 'Ce compte', matches)
+      const saved = await ask(
+        window.comptes.createTransfer(account.id, Number(target.value), date.value, amount.value, matched),
+      )
+      if (saved === null) {
+        render()
+        return
+      }
+      notice = 'Virement enregistré.'
+      await loadWorkspace()
+      render()
+    }),
+  )
+  const transfers = detail?.transfers ?? []
+  if (transfers.length === 0) card.append(el('p', 'empty', 'Aucun virement cette année.'))
+  else {
+    const table = el('table', 'grid')
+    const head = el('tr')
+    for (const label of ['Date', 'Sens', 'Compte', 'Montant', '']) head.append(el('th', label === 'Montant' ? 'num' : '', label))
+    table.append(head)
+    for (const transfer of transfers) {
+      const outgoing = transfer.fromAccountId === account.id
+      const other = outgoing
+        ? `${transfer.toAccountName} · ${transfer.toBankName}`
+        : `${transfer.fromAccountName} · ${transfer.fromBankName}`
+      const row = el('tr')
+      row.append(el('td', '', formatIsoDate(transfer.date)), el('td', '', outgoing ? 'Vers' : 'De'), el('td', '', other))
+      row.append(moneyCell(outgoing ? -transfer.amountCents : transfer.amountCents))
+      const action = el('td')
+      action.append(
+        button('Retirer', 'danger', async () => {
+          const removed = await ask(window.comptes.deleteTransfer(transfer.id))
+          if (removed === null) {
+            render()
+            return
+          }
+          notice = 'Virement retiré.'
+          await loadWorkspace()
+          render()
+        }),
+      )
+      row.append(action)
+      table.append(row)
+    }
+    card.append(wrap(table))
+  }
+  return card
+}
+
+function transferTargets(exceptId: number): AccountCard[] {
+  return (workspace?.accounts ?? []).filter(
+    (item) => !item.archived && item.id !== exceptId && (item.kind === 'courant' || item.kind === 'epargne'),
+  )
 }
 
 function renderBatches(batches: BatchView[]): HTMLElement {
@@ -632,24 +1070,41 @@ function renderBatches(batches: BatchView[]): HTMLElement {
   return card
 }
 
-function renderOperations(operations: OperationView[]): HTMLElement {
+function renderOperations(operations: OperationView[], accountId: number): HTMLElement {
   const card = el('section', 'card')
   card.append(el('h2', '', `Opérations ${year}`))
   if (operations.length === 0) card.append(el('p', 'empty', 'Aucune opération sur cette année.'))
   else {
     const table = el('table', 'grid')
     const head = el('tr')
-    for (const label of ['Date', 'Libellé', 'Montant', 'Catégorie']) {
+    for (const label of ['Date', 'Libellé', 'Montant', 'Catégorie', '']) {
       head.append(el('th', label === 'Catégorie' ? 'point' : '', label))
     }
     table.append(head)
     for (const operation of operations) {
       const row = el('tr')
-      row.append(el('td', '', formatIsoDate(operation.date)), el('td', '', operation.label))
-      row.append(moneyCell(operation.amountCents))
-      row.append(
-        pointCell(operation.amountCents, operation.categoryId, operation.categoryName, operation.id, loadDetail),
-      )
+      if (editingOperationId === operation.id && !operation.imported) {
+        const date = dateInput(operation.date)
+        const label = textInput(operation.label)
+        const amount = amountInput(formatInputAmount(operation.amountCents))
+        row.append(cell(date), cell(label), cell(amount))
+        row.append(el('td'), operationActions(operation, { date, label, amount }))
+      } else {
+        row.append(el('td', '', formatIsoDate(operation.date)), el('td', '', operation.label))
+        row.append(moneyCell(operation.amountCents))
+        row.append(
+          pointCell(
+            operation.amountCents,
+            operation.categoryId,
+            operation.categoryName,
+            operation.id,
+            accountId,
+            operation.counterpartyAccountId,
+            loadDetail,
+          ),
+          operationActions(operation),
+        )
+      }
       table.append(row)
     }
     card.append(wrap(table))
@@ -726,8 +1181,8 @@ function renderPointing(): HTMLElement {
   page.append(el('h1', '', 'Pointage'))
   const select = el('select') as HTMLSelectElement
   select.append(option('', 'Tous les comptes'))
-  for (const account of (workspace?.accounts ?? []).filter((item) => !item.archived && item.kind === 'releve')) {
-    select.append(option(String(account.id), account.name))
+  for (const account of (workspace?.accounts ?? []).filter((item) => !item.archived && item.kind === 'courant')) {
+    select.append(option(String(account.id), `${account.name} · ${account.bankName}`))
   }
   select.value = pointFilter === null ? '' : String(pointFilter)
   select.addEventListener('change', async () => {
@@ -747,8 +1202,8 @@ function renderPointing(): HTMLElement {
     const line = el('tr')
     const labelCell = el('td', 'label')
     labelCell.append(el('div', 'label-text', row.label))
-    line.append(el('td', '', formatIsoDate(row.date)), el('td', '', row.accountName), labelCell, moneyCell(row.amountCents))
-    line.append(pointCell(row.amountCents, row.suggestedCategoryId, null, row.id, async () => {
+    line.append(el('td', '', formatIsoDate(row.date)), el('td', '', `${row.accountName} · ${row.bankName}`), labelCell, moneyCell(row.amountCents))
+    line.append(pointCell(row.amountCents, row.suggestedCategoryId, null, row.id, row.accountId, null, async () => {
       await loadUnpointed()
       if (screen === 'account') await loadDetail()
     }))
@@ -869,35 +1324,154 @@ function familyCard(family: Family): HTMLElement {
   return card
 }
 
+function operationActions(
+  operation: OperationView,
+  editing?: { date: HTMLInputElement; label: HTMLInputElement; amount: HTMLInputElement },
+): HTMLElement {
+  const actions = el('td', 'actions')
+  if (editing) {
+    actions.append(
+      button('Enregistrer', 'small', () => {
+        void saveManual(operation.id, editing.date.value, editing.label.value, editing.amount.value)
+      }),
+      button('Annuler', 'small', () => {
+        editingOperationId = null
+        void loadDetail()
+      }),
+    )
+    return actions
+  }
+  if (operation.categoryId !== null) {
+    actions.append(unpointButton(() => {
+      void clearPoint(operation.id)
+    }))
+  }
+  if (!operation.imported) {
+    actions.append(
+      button('Modifier', 'small', () => {
+        editingOperationId = operation.id
+        void loadDetail()
+      }),
+      button('Effacer', 'small danger', () => {
+        void eraseManual(operation)
+      }),
+    )
+  }
+  return actions
+}
+
+async function chooseTransferMatch(accountLabel: string, matches: TransferMatch[]): Promise<number | null> {
+  for (let index = 0; index < matches.length; index += 1) {
+    const match = matches[index]
+    const line = `${formatIsoDate(match.date)} · ${match.label} · ${formatEuros(match.amountCents)}`
+    const suffix = index === matches.length - 1 ? '\n\nSinon, une nouvelle ligne sera créée.' : ''
+    if (window.confirm(`${accountLabel} a déjà cette ligne :\n${line}\n\nC’est ce virement ?${suffix}`)) return match.id
+  }
+  return null
+}
+
+async function clearPoint(operationId: number): Promise<void> {
+  const saved = await ask(window.comptes.unpointOperation(operationId))
+  if (saved === null) {
+    render()
+    return
+  }
+  await loadDetail()
+  await loadWorkspace()
+}
+
+async function saveManual(operationId: number, date: string, label: string, amount: string): Promise<void> {
+  const saved = await ask(window.comptes.updateManualOperation(operationId, date, label, amount))
+  if (saved === null) {
+    render()
+    return
+  }
+  editingOperationId = null
+  await loadDetail()
+  await loadWorkspace()
+}
+
+async function eraseManual(operation: OperationView): Promise<void> {
+  if (!window.confirm(`Effacer « ${operation.label} » ? Cette ligne ne vient pas d’un import.`)) return
+  const saved = await ask(window.comptes.deleteManualOperation(operation.id))
+  if (saved === null) {
+    render()
+    return
+  }
+  editingOperationId = null
+  await loadDetail()
+  await loadWorkspace()
+}
+
 function pointCell(
   amountCents: number,
   currentId: number | null,
   currentName: string | null,
   operationId: number,
+  accountId: number,
+  counterpartyAccountId: number | null,
   after: () => Promise<void>,
 ): HTMLElement {
   const choice = categorySelect(amountCents, currentId, currentName)
+  const target = el('select') as HTMLSelectElement
+  target.className = 'transfer-target'
+  target.append(option('', amountCents < 0 ? 'Vers le compte' : 'Depuis le compte'))
+  for (const item of transferTargets(accountId)) target.append(option(String(item.id), `${item.name} · ${item.bankName}`))
+  if (counterpartyAccountId) target.value = String(counterpartyAccountId)
+  const sync = () => {
+    target.hidden = categoryRole(choice.value) !== 'virement'
+  }
+  choice.addEventListener('change', sync)
+  sync()
   const cell = el('td', 'point')
   const rowBox = el('div', 'point-row')
   rowBox.append(
     choice,
+    target,
     iconButton('Pointer', async () => {
       if (!choice.value) {
         notice = 'Choisis une catégorie.'
         render()
         return
       }
-      const done = await ask(window.comptes.pointOperation(operationId, Number(choice.value)))
+      const virement = categoryRole(choice.value) === 'virement'
+      if (virement && !target.value) {
+        notice = amountCents < 0 ? 'Choisis le compte destinataire.' : 'Choisis le compte d’origine.'
+        render()
+        return
+      }
+      let matched: number | null = null
+      if (virement) {
+        const matches = await ask(window.comptes.previewOperationTransfer(operationId, Number(target.value)))
+        if (matches === null) {
+          render()
+          return
+        }
+        matched = await chooseTransferMatch(target.selectedOptions[0]?.textContent ?? 'Ce compte', matches)
+      }
+      const done = await ask(
+        window.comptes.pointOperation(operationId, Number(choice.value), virement ? Number(target.value) : null, matched),
+      )
       if (done === null) {
         render()
         return
       }
       await after()
+      await loadWorkspace()
       render()
     }),
   )
   cell.append(rowBox)
   return cell
+}
+
+function categoryRole(categoryId: string): 'virement' | null {
+  if (!categoryId) return null
+  for (const family of workspace?.families ?? []) {
+    const category = family.categories.find((item) => String(item.id) === categoryId)
+    if (category) return category.role
+  }
+  return null
 }
 
 function categorySelect(amountCents: number, currentId: number | null, currentName: string | null): HTMLSelectElement {
@@ -959,6 +1533,23 @@ async function archiveAccount(account: Account): Promise<void> {
   render()
 }
 
+async function eraseAccount(account: Account): Promise<void> {
+  const label = `${account.name} · ${account.bankName}`
+  if (!window.confirm(`Effacer ${label} ? Le compte et tout ce qu’il contient seront supprimés.`)) return
+  const removed = await ask(window.comptes.deleteAccount(account.id))
+  if (removed === null) {
+    render()
+    return
+  }
+  accountId = null
+  detail = null
+  editing = false
+  screen = 'accounts'
+  notice = 'Compte effacé.'
+  await loadWorkspace()
+  render()
+}
+
 async function move(kind: 'family' | 'category', id: number, direction: -1 | 1): Promise<void> {
   const done =
     kind === 'family'
@@ -975,11 +1566,14 @@ async function move(kind: 'family' | 'category', id: number, direction: -1 | 1):
 async function go(next: Screen): Promise<void> {
   screen = next
   editing = false
+  draftBank = null
   preview = null
   notice = ''
   drill = null
-  if (next === 'pointing') await loadUnpointed()
+  editingOperationId = null
   if (next !== 'account') detail = null
+  await writes
+  if (status.state === 'ready') await loadWorkspace()
   render()
 }
 
@@ -987,6 +1581,8 @@ async function openAccount(id: number): Promise<void> {
   accountId = id
   screen = 'account'
   editing = false
+  editingOperationId = null
+  draftBank = null
   preview = null
   notice = ''
   drill = null
@@ -999,6 +1595,22 @@ async function changeYear(next: number): Promise<void> {
   drill = null
   await loadWorkspace()
   render()
+}
+
+function startNewAccount(bankName: string | null): void {
+  accountId = null
+  editing = true
+  draftBank = bankName
+  detail = null
+  preview = null
+  notice = ''
+  screen = 'account'
+  render()
+}
+
+function knownBanks(): string[] {
+  const names = new Set((workspace?.accounts ?? []).map((account) => account.bankName))
+  return [...names].sort((a, b) => a.localeCompare(b, 'fr'))
 }
 
 function monthHead(): HTMLElement {
@@ -1024,11 +1636,35 @@ function addAmounts(row: HTMLElement, values: readonly (number | null)[]): void 
   for (const value of values) row.append(value === null ? el('td', 'num') : moneyCell(value))
 }
 
+function kindLabel(kind: Account['kind']): string {
+  if (kind === 'epargne') return 'Épargne'
+  if (kind === 'titre') return 'Titre'
+  return 'Courant'
+}
+
+function cell(content: Node): HTMLElement {
+  const item = el('td')
+  item.append(content)
+  return item
+}
+
 function figure(label: string, cents: number | null): HTMLElement {
+  return amountFigure(label, cents, formatEuros)
+}
+
+function figureMillis(label: string, millis: number | null): HTMLElement {
+  return amountFigure(label, millis, formatMillis)
+}
+
+function amountFigure(label: string, amount: number | null, format: (value: number) => string): HTMLElement {
   const box = el('div')
   box.append(el('span', 'muted', label))
-  box.append(cents === null ? el('span', 'figure muted', '—') : el('span', `figure${cents < 0 ? ' neg' : ''}`, formatEuros(cents)))
+  box.append(amount === null ? el('span', 'figure muted', '—') : el('span', `figure${amount < 0 ? ' neg' : ''}`, format(amount)))
   return box
+}
+
+function millisCell(millis: number): HTMLElement {
+  return el('td', `num${millis < 0 ? ' neg' : ''}`, formatMillis(millis))
 }
 
 function moneyCell(cents: number): HTMLElement {
@@ -1044,6 +1680,25 @@ function wrap(table: HTMLElement): HTMLElement {
 function textInput(value: string): HTMLInputElement {
   const input = document.createElement('input')
   input.type = 'text'
+  input.value = value
+  return input
+}
+
+function amountInput(value: string): HTMLInputElement {
+  const input = textInput(value)
+  input.className = 'amount'
+  input.inputMode = 'decimal'
+  input.autocomplete = 'off'
+  input.spellcheck = false
+  input.size = 12
+  input.addEventListener('focus', () => input.select())
+  return input
+}
+
+function dateInput(value: string): HTMLInputElement {
+  const input = document.createElement('input')
+  input.type = 'date'
+  input.className = 'valued-on'
   input.value = value
   return input
 }
@@ -1073,6 +1728,30 @@ function option(value: string, label: string): HTMLOptionElement {
   const item = document.createElement('option')
   item.value = value
   item.textContent = label
+  return item
+}
+
+function plusButton(label: string, onClick: () => void): HTMLButtonElement {
+  const item = document.createElement('button')
+  item.type = 'button'
+  item.className = 'icon'
+  item.title = label
+  item.setAttribute('aria-label', label)
+  item.innerHTML =
+    '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'
+  item.addEventListener('click', onClick)
+  return item
+}
+
+function unpointButton(onClick: () => void): HTMLButtonElement {
+  const item = document.createElement('button')
+  item.type = 'button'
+  item.className = 'icon alert'
+  item.title = 'Ôter le pointage'
+  item.setAttribute('aria-label', 'Ôter le pointage')
+  item.innerHTML =
+    '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M4.5 4.5 11.5 11.5M11.5 4.5 4.5 11.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'
+  item.addEventListener('click', onClick)
   return item
 }
 
