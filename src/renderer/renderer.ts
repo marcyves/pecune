@@ -1222,9 +1222,9 @@ function renderCategories(): HTMLElement {
   const name = field('Nouvelle famille', 'text', '')
   const nature = el('select') as HTMLSelectElement
   nature.append(option('depense', 'Dépense'), option('encaissement', 'Encaissement'))
-  creator.append(el('div', 'form-row', name.label, labeled('Nature', nature)))
-  creator.append(
-    button('Ajouter la famille', 'primary', async () => {
+  const creatorRow = el('div', 'form-row', name.label, labeled('Nature', nature))
+  creatorRow.append(
+    glyphButton('Ajouter la famille', 'plus', async () => {
       const saved = await ask(window.comptes.saveFamily({ name: name.input.value, nature: nature.value, archived: false }))
       if (!saved) {
         render()
@@ -1232,14 +1232,24 @@ function renderCategories(): HTMLElement {
       }
       await loadWorkspace()
       render()
-    }),
+    }, 'primary'),
   )
+  creator.append(creatorRow)
   creator.addEventListener('submit', (event) => event.preventDefault())
   page.append(creator)
-  for (const family of workspace?.families ?? []) {
-    page.append(familyCard(family))
-  }
+  const columns = el('div', 'category-columns')
+  columns.append(familyColumn('Dépenses', 'depense'), familyColumn('Encaissements', 'encaissement'))
+  page.append(columns)
   return page
+}
+
+function familyColumn(title: string, nature: Nature): HTMLElement {
+  const column = el('section')
+  column.append(el('h2', '', title))
+  const families = (workspace?.families ?? []).filter((family) => family.nature === nature)
+  if (families.length === 0) column.append(el('p', 'empty', 'Aucune famille.'))
+  for (const family of families) column.append(familyCard(family))
+  return column
 }
 
 function familyCard(family: Family): HTMLElement {
@@ -1247,61 +1257,67 @@ function familyCard(family: Family): HTMLElement {
   const name = textInput(family.name)
   const line = el('div', 'family-line')
   line.append(inlineLabel('Famille :', name))
-  line.append(el('span', 'muted', family.nature === 'depense' ? 'Dépense' : 'Encaissement'))
-  line.append(button('Haut', '', () => move('family', family.id, -1)))
-  line.append(button('Bas', '', () => move('family', family.id, 1)))
+  line.append(glyphButton('Haut', 'up', () => move('family', family.id, -1)))
+  line.append(glyphButton('Bas', 'down', () => move('family', family.id, 1)))
   line.append(
-    button('Enregistrer', '', async () => {
+    glyphButton('Enregistrer', 'check', async () => {
       await ask(window.comptes.saveFamily({ id: family.id, name: name.value, archived: family.archived }))
       await loadWorkspace()
       render()
-    }),
+    }, 'primary'),
   )
   line.append(
-    button(family.archived ? 'Réactiver' : 'Archiver', 'danger', async () => {
+    glyphButton(family.archived ? 'Réactiver' : 'Archiver', family.archived ? 'restore' : 'archive', async () => {
       if (!family.archived && !window.confirm(`Archiver la famille ${family.name} ?`)) return
       await ask(window.comptes.saveFamily({ id: family.id, name: name.value, archived: !family.archived }))
       await loadWorkspace()
       render()
-    }),
+    }, family.archived ? '' : 'danger'),
   )
   card.append(line)
   const list = el('ul', 'category-list')
   for (const category of family.categories) {
     const categoryName = textInput(category.name)
     categoryName.setAttribute('aria-label', 'Nom de la catégorie')
+    const familySelect = el('select') as HTMLSelectElement
+    familySelect.setAttribute('aria-label', 'Famille')
+    for (const candidate of (workspace?.families ?? []).filter((item) => item.nature === family.nature)) {
+      const choice = option(String(candidate.id), candidate.archived ? `${candidate.name} (archivée)` : candidate.name)
+      if (candidate.id === category.familyId) choice.selected = true
+      familySelect.append(choice)
+    }
     const row = el('div', 'category-line')
-    row.append(categoryName)
-    row.append(button('Haut', '', () => move('category', category.id, -1)))
-    row.append(button('Bas', '', () => move('category', category.id, 1)))
+    row.append(categoryName, familySelect)
+    row.append(glyphButton('Haut', 'up', () => move('category', category.id, -1)))
+    row.append(glyphButton('Bas', 'down', () => move('category', category.id, 1)))
     row.append(
-      button('Enregistrer', '', async () => {
+      glyphButton('Enregistrer', 'check', async () => {
         await ask(
           window.comptes.saveCategory({
             id: category.id,
             name: categoryName.value,
-            familyId: family.id,
+            familyId: Number(familySelect.value),
             archived: category.archived,
           }),
         )
         await loadWorkspace()
         render()
-      }),
+      }, 'primary'),
     )
     row.append(
-      button(category.archived ? 'Réactiver' : 'Archiver', 'danger', async () => {
+      glyphButton(category.archived ? 'Réactiver' : 'Archiver', category.archived ? 'restore' : 'archive', async () => {
         if (!category.archived && !window.confirm(`Archiver la catégorie ${category.name} ?`)) return
         await ask(
           window.comptes.saveCategory({
             id: category.id,
             name: categoryName.value,
-            familyId: family.id,
+            familyId: Number(familySelect.value),
             archived: !category.archived,
           }),
         )
         await loadWorkspace()
         render()
-      }),
+      }, category.archived ? '' : 'danger'),
     )
     list.append(el('li', '', row))
   }
@@ -1312,7 +1328,7 @@ function familyCard(family: Family): HTMLElement {
   const addRow = el('div', 'category-add')
   addRow.append(add)
   addRow.append(
-    button('Ajouter', '', async () => {
+    glyphButton('Ajouter', 'plus', async () => {
       const saved = await ask(window.comptes.saveCategory({ name: add.value, familyId: family.id, archived: false }))
       if (!saved) {
         render()
@@ -1320,7 +1336,7 @@ function familyCard(family: Family): HTMLElement {
       }
       await loadWorkspace()
       render()
-    }),
+    }, 'primary'),
   )
   card.append(addRow)
   return card
@@ -1734,13 +1750,31 @@ function option(value: string, label: string): HTMLOptionElement {
 }
 
 function plusButton(label: string, onClick: () => void): HTMLButtonElement {
+  return glyphButton(label, 'plus', onClick)
+}
+
+function glyphButton(
+  label: string,
+  glyph: 'up' | 'down' | 'check' | 'plus' | 'archive' | 'restore',
+  onClick: () => void,
+  tone = '',
+): HTMLButtonElement {
+  const marks: Record<typeof glyph, string> = {
+    up: '<path d="M3.5 10.5 8 6 12.5 10.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+    down: '<path d="M3.5 5.5 8 10 12.5 5.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+    check: '<path d="M3 8.5 6.2 12 13 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+    plus: '<path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+    archive:
+      '<path d="M2.5 6.2h11M3.6 6.2V13h8.8V6.2M6.2 9.2h3.6M2.5 6.2 4.2 3.2h7.6l1.7 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+    restore:
+      '<path d="M3.2 8a4.4 4.4 0 1 0 1.2-3.1M3 3.2v3.3h3.3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+  }
   const item = document.createElement('button')
   item.type = 'button'
-  item.className = 'icon'
+  item.className = tone ? `icon ${tone}` : 'icon'
   item.title = label
   item.setAttribute('aria-label', label)
-  item.innerHTML =
-    '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'
+  item.innerHTML = `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">${marks[glyph]}</svg>`
   item.addEventListener('click', onClick)
   return item
 }
@@ -1758,15 +1792,7 @@ function unpointButton(onClick: () => void): HTMLButtonElement {
 }
 
 function iconButton(label: string, onClick: () => void): HTMLButtonElement {
-  const item = document.createElement('button')
-  item.type = 'button'
-  item.className = 'icon primary'
-  item.title = label
-  item.setAttribute('aria-label', label)
-  item.innerHTML =
-    '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3 8.5 6.2 12 13 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
-  item.addEventListener('click', onClick)
-  return item
+  return glyphButton(label, 'check', onClick, 'primary')
 }
 
 function button(label: string, className: string, onClick: () => void): HTMLButtonElement {

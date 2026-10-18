@@ -23,6 +23,7 @@ import {
   deletePosition,
   globalSummary,
   listAccounts,
+  listFamilies,
   listOperations,
   listUnpointed,
   operationCount,
@@ -418,6 +419,28 @@ describe('règles du classeur', () => {
     await confirmImport(database, account.id, fresh)
     expect(listUnpointed(database, account.id)[0].suggestedCategoryId).toBeNull()
     expect(listOperations(database, account.id, 2026).some((row) => row.categoryName === 'Supermarché')).toBe(true)
+  })
+
+  it('déplace une catégorie vers une autre famille de la même nature', () => {
+    const { database } = tempDatabase()
+    const courses = createFamily(database, { name: 'Courses', nature: 'depense' })
+    const maison = createFamily(database, { name: 'Maison', nature: 'depense' })
+    const salaires = createFamily(database, { name: 'Salaires', nature: 'encaissement' })
+    const auchan = createCategory(database, { name: 'Auchan', familyId: courses.id })
+    createCategory(database, { name: 'Loyer', familyId: maison.id })
+
+    const moved = updateCategory(database, auchan.id, { name: 'Auchan', archived: false, familyId: maison.id })
+    expect(moved.familyId).toBe(maison.id)
+    expect(moved.sortOrder).toBe(2)
+    const families = listFamilies(database)
+    expect(families.find((family) => family.id === courses.id)?.categories).toEqual([])
+    expect(families.find((family) => family.id === maison.id)?.categories.map((category) => category.name)).toEqual([
+      'Loyer',
+      'Auchan',
+    ])
+    expect(() => updateCategory(database, auchan.id, { name: 'Auchan', archived: false, familyId: salaires.id })).toThrow(
+      LedgerError,
+    )
   })
 
   it('suggère par mot-clé quand le libellé change autour du commerçant', async () => {

@@ -44,6 +44,14 @@ button.icon.alert:hover {
   border-color: #732626;
 }
 
+button.icon.danger {
+  color: #8d2f2f;
+}
+
+button.icon.danger:hover {
+  border-color: #8d2f2f;
+}
+
 button.small {
   font-size: 0.85rem;
   padding: 0.2rem 0.5rem;
@@ -167,6 +175,15 @@ h2 { font-size: 1.25rem; }
   align-items: end;
 }
 
+.category-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0 1.25rem;
+  align-items: start;
+}
+
+.category-columns h2 { margin-top: 0; }
+
 .family-line, .category-line, .category-add {
   display: flex;
   flex-wrap: wrap;
@@ -181,6 +198,8 @@ label.inline-label {
   gap: 0.45rem;
   font-size: 1rem;
 }
+
+.category-line select { max-width: 11rem; }
 
 .category-list {
   margin: 0.75rem 0 0.45rem;

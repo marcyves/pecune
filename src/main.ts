@@ -243,7 +243,13 @@ function register(): void {
   handle('saveCategory', (input) => {
     const value = input as { id?: number; name: string; familyId: number; archived: boolean }
     const db = requireDatabase()
-    if (value.id) return updateCategory(db, value.id, { name: value.name, archived: value.archived })
+    if (value.id) {
+      return updateCategory(db, value.id, {
+        name: value.name,
+        archived: value.archived,
+        familyId: Number(value.familyId),
+      })
+    }
     return createCategory(db, { name: value.name, familyId: value.familyId })
   })
   handle('moveCategory', (id, direction) => moveCategory(requireDatabase(), Number(id), direction as -1 | 1))

@@ -169,7 +169,8 @@ export function updateFamily(
 }
 
 export function moveFamily(database: DatabaseSync, id: number, direction: -1 | 1): void {
-  moveRow(database, 'families', id, direction, '')
+  const family = familyById(database, id)
+  moveRow(database, 'families', id, direction, 'WHERE nature = ?', [family.nature])
 }
 
 export function createCategory(database: DatabaseSync, input: { name: string; familyId: number }): Category {
@@ -191,11 +192,30 @@ export function createCategory(database: DatabaseSync, input: { name: string; fa
 export function updateCategory(
   database: DatabaseSync,
   id: number,
-  input: { name: string; archived: boolean },
+  input: { name: string; archived: boolean; familyId?: number },
 ): Category {
-  categoryById(database, id)
+  const category = categoryById(database, id)
   const name = requiredName(input.name, 'Le nom de la catégorie est requis.')
-  run(database, 'UPDATE categories SET name = ?, archived = ? WHERE id = ?', [name, input.archived ? 1 : 0, id])
+  const familyId = input.familyId ?? category.familyId
+  if (familyId !== category.familyId) {
+    const current = familyById(database, category.familyId)
+    const next = familyById(database, familyId)
+    if (next.nature !== current.nature) throw new LedgerError('La famille choisie n’a pas la même nature.')
+    const order = nextOrder(
+      database,
+      'SELECT COALESCE(MAX(sort_order), 0) AS value FROM categories WHERE family_id = ?',
+      [familyId],
+    )
+    run(database, 'UPDATE categories SET name = ?, archived = ?, family_id = ?, sort_order = ? WHERE id = ?', [
+      name,
+      input.archived ? 1 : 0,
+      familyId,
+      order,
+      id,
+    ])
+  } else {
+    run(database, 'UPDATE categories SET name = ?, archived = ? WHERE id = ?', [name, input.archived ? 1 : 0, id])
+  }
   return categoryById(database, id)
 }
 
