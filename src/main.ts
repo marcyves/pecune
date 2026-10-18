@@ -6,6 +6,7 @@ import type { DatabaseSync } from 'node:sqlite'
 import { assertDatabase, createDatabase, openDatabase } from './db.ts'
 import { dateToIso } from './dates.ts'
 import { LedgerError } from './errors.ts'
+import { parseUserMillis } from './money.ts'
 import {
   accountFigures,
   accountSummary,
@@ -154,8 +155,9 @@ function accountDetail(id: number, year: number) {
 function saveAccount(input: SaveAccount) {
   const db = requireDatabase()
   const keepsOpening = input.kind === 'courant' || input.kind === 'epargne'
-  const openingCents = keepsOpening ? centsFromInput(input.openingAmount) : null
   const openingDate = keepsOpening && input.openingDate ? input.openingDate : null
+  const openingCents = input.kind === 'courant' ? centsFromInput(input.openingAmount) : null
+  const openingMillis = input.kind === 'epargne' ? optionalMillis(input.openingAmount) : null
   if (input.id) {
     return updateAccount(db, input.id, {
       name: input.name,
@@ -163,6 +165,7 @@ function saveAccount(input: SaveAccount) {
       archived: input.archived,
       mapping: input.kind === 'courant' ? input.mapping : null,
       openingCents,
+      openingMillis,
       openingDate,
     })
   }
@@ -172,8 +175,15 @@ function saveAccount(input: SaveAccount) {
     kind: input.kind,
     mapping: input.mapping,
     openingCents,
+    openingMillis,
     openingDate,
   })
+}
+
+function optionalMillis(raw: string): number | null {
+  const parsed = parseUserMillis(raw)
+  if (parsed === 'invalid') throw new LedgerError('Montant illisible.')
+  return parsed
 }
 
 function handle(channel: string, fn: (...args: unknown[]) => unknown): void {

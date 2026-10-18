@@ -20,6 +20,7 @@ CREATE TABLE accounts (
   archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
   mapping_json TEXT,
   opening_cents INTEGER,
+  opening_millis INTEGER,
   opening_date TEXT,
   cash_cents INTEGER,
   cash_millis INTEGER,
@@ -87,7 +88,7 @@ CREATE TABLE transfers (
 );
 CREATE INDEX idx_transfers_from ON transfers(from_account_id);
 CREATE INDEX idx_transfers_to ON transfers(to_account_id);
-INSERT INTO meta (key, value) VALUES ('schema_version', '8');
+INSERT INTO meta (key, value) VALUES ('schema_version', '9');
 `
 
 export function createDatabase(path: string): DatabaseSync {
@@ -121,7 +122,8 @@ function migrate(database: DatabaseSync): void {
   if (schemaVersion(database) === '5') migrateMillis(database)
   if (schemaVersion(database) === '6') migrateTransfers(database)
   if (schemaVersion(database) === '7') migrateSavingsOpening(database)
-  if (schemaVersion(database) !== '8') throw new LedgerError('Ce fichier n’est pas une base Comptes.')
+  if (schemaVersion(database) === '8') migrateSavingsScale(database)
+  if (schemaVersion(database) !== '9') throw new LedgerError('Ce fichier n’est pas une base Comptes.')
 }
 
 function schemaVersion(database: DatabaseSync): string | undefined {
@@ -344,6 +346,33 @@ function migrateSavingsOpening(database: DatabaseSync): void {
   database.exec(`UPDATE meta SET value = '8' WHERE key = 'schema_version'`)
 }
 
+function migrateSavingsScale(database: DatabaseSync): void {
+  database.exec('BEGIN')
+  try {
+    if (tableExists(database, 'accounts') && !columnExists(database, 'accounts', 'opening_millis')) {
+      database.exec('ALTER TABLE accounts ADD COLUMN opening_millis INTEGER')
+    }
+    if (tableExists(database, 'accounts')) {
+      database.exec(
+        `UPDATE accounts SET opening_millis = opening_cents * 10
+         WHERE kind = 'epargne' AND opening_cents IS NOT NULL AND opening_millis IS NULL`,
+      )
+      database.exec(`UPDATE accounts SET opening_cents = NULL WHERE kind = 'epargne'`)
+    }
+    if (tableExists(database, 'operations') && tableExists(database, 'accounts')) {
+      database.exec(
+        `UPDATE operations SET amount_cents = amount_cents * 10
+         WHERE account_id IN (SELECT id FROM accounts WHERE kind = 'epargne')`,
+      )
+    }
+    database.exec(`UPDATE meta SET value = '9' WHERE key = 'schema_version'`)
+    database.exec('COMMIT')
+  } catch (error) {
+    database.exec('ROLLBACK')
+    throw error
+  }
+}
+
 function tableExists(database: DatabaseSync, name: string): boolean {
   return Boolean(database.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(name))
 }
@@ -408,7 +437,7 @@ export function assertDatabase(path: string): void {
     const row = database.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as
       | { value: string }
       | undefined
-    if (!row || !['1', '2', '3', '4', '5', '6', '7', '8'].includes(row.value)) throw new LedgerError('Ce fichier n’est pas une base Comptes.')
+    if (!row || !['1', '2', '3', '4', '5', '6', '7', '8', '9'].includes(row.value)) throw new LedgerError('Ce fichier n’est pas une base Comptes.')
   } catch (error) {
     if (error instanceof LedgerError) throw error
     throw new LedgerError('La base ne s’ouvre pas.')

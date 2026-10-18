@@ -1,6 +1,6 @@
 import { MONTH_LABELS, formatEuros, formatInputAmount, formatInputMillis, formatIsoDate, formatMillis } from '../format.ts'
 import { todayIso } from '../dates.ts'
-import { formatQuantity, lineMillis } from '../money.ts'
+import { formatQuantity, lineMillis, millisToCents } from '../money.ts'
 import type {
   Account,
   AccountSummary,
@@ -496,11 +496,9 @@ function accountForm(account: Account | null): HTMLElement {
   const amountHeader = field('Colonne montant', 'text', mapping?.mode === 'signe' ? mapping.amountHeader : 'Montant')
   const debitHeader = field('Colonne débit', 'text', mapping?.mode === 'debit-credit' ? mapping.debitHeader : 'Debit')
   const creditHeader = field('Colonne crédit', 'text', mapping?.mode === 'debit-credit' ? mapping.creditHeader : 'Credit')
-  const openingAmount = field(
-    'Solde initial',
-    'text',
-    account?.openingCents === null || account?.openingCents === undefined ? '' : formatInputAmount(account.openingCents),
-  )
+  const openingAmount = field('Solde initial', 'text', openingInputValue(account ?? null))
+  openingAmount.input.placeholder = account?.kind === 'epargne' ? '0,000' : '0,00'
+  openingAmount.input.className = 'amount'
   const openingDate = field('Date d’ouverture', 'date', account?.openingDate ?? '')
   mappingBox.append(
     dateHeader.label,
@@ -519,6 +517,7 @@ function accountForm(account: Account | null): HTMLElement {
     const courant = kind.value === 'courant'
     mappingBox.hidden = !courant
     openingBox.hidden = kind.value === 'titre'
+    openingAmount.input.placeholder = kind.value === 'epargne' ? '0,000' : '0,00'
   }
   kind.addEventListener('change', sync)
   sync()
@@ -852,11 +851,12 @@ function operationsForDrill(): OperationView[] {
 function balanceEditor(account: Account, summary: BalanceSummary): HTMLElement {
   const card = el('section', 'card')
   card.append(el('h2', '', `Soldes ${year}`))
-  card.append(el('p', 'muted', 'Le solde de fin de mois part du solde initial, des mouvements et des virements.'))
-  if (account.openingCents === null || !account.openingDate) {
+  card.append(el('p', 'muted', 'Le solde de fin de mois part du solde initial, des mouvements et des virements. Les totaux sont arrondis au centime.'))
+  if (account.openingMillis === null || !account.openingDate) {
     card.append(el('p', 'banner', 'Solde initial manquant. Les soldes ne sont pas calculés.'))
   }
-  const amount = amountInput(account.openingCents === null ? '' : formatInputAmount(account.openingCents))
+  const amount = amountInput(account.openingMillis === null ? '' : formatInputMillis(account.openingMillis))
+  amount.placeholder = '0,000'
   const date = dateInput(account.openingDate ?? '')
   const form = el('div', 'form-row')
   form.append(labeled('Solde initial', amount), labeled('Date', date))
@@ -869,9 +869,9 @@ function balanceEditor(account: Account, summary: BalanceSummary): HTMLElement {
   const table = el('table', 'grid')
   table.append(monthHead())
   table.append(
-    amountRow('Solde', summary.balances, ''),
-    amountRow('Dépense', summary.expense, ''),
-    amountRow('Encaissement', summary.income, ''),
+    amountRow('Solde', displayCents(summary.balances, false), ''),
+    amountRow('Dépense', displayCents(summary.expense, true), ''),
+    amountRow('Encaissement', displayCents(summary.income, true), ''),
   )
   card.append(wrap(table))
   return card
@@ -909,7 +909,7 @@ function movementEditor(account: Account): HTMLElement {
   const label = textInput('')
   label.placeholder = 'Libellé'
   const amount = amountInput('')
-  amount.placeholder = '0,00'
+  amount.placeholder = '0,000'
   const direction = el('select') as HTMLSelectElement
   direction.append(option('entree', 'Entrée'), option('sortie', 'Sortie'))
   const form = el('div', 'form-row')
@@ -955,10 +955,10 @@ function movementTable(operations: OperationView[]): HTMLElement {
     if (editingOperationId === operation.id) {
       const date = dateInput(operation.date)
       const label = textInput(operation.label)
-      const amount = amountInput(formatInputAmount(operation.amountCents))
+      const amount = amountInput(formatInputMillis(operation.amountCents))
       row.append(cell(date), cell(label), cell(amount), operationActions(operation, { date, label, amount }))
     } else {
-      row.append(el('td', '', formatIsoDate(operation.date)), el('td', '', operation.label), moneyCell(operation.amountCents))
+      row.append(el('td', '', formatIsoDate(operation.date)), el('td', '', operation.label), millisCell(operation.amountCents))
       row.append(operationActions(operation))
     }
     table.append(row)
@@ -1538,7 +1538,7 @@ async function archiveAccount(account: Account): Promise<void> {
       kind: account.kind,
       archived: !account.archived,
       mapping: account.mapping,
-      openingAmount: account.openingCents === null ? '' : formatInputAmount(account.openingCents),
+      openingAmount: openingInputValue(account),
       openingDate: account.openingDate ?? '',
     }),
   )
@@ -1683,6 +1683,20 @@ function amountFigure(label: string, amount: number | null, format: (value: numb
 
 function millisCell(millis: number): HTMLElement {
   return el('td', `num${millis < 0 ? ' neg' : ''}`, formatMillis(millis))
+}
+
+function openingInputValue(account: Account | null): string {
+  if (!account) return ''
+  if (account.kind === 'epargne') return account.openingMillis === null ? '' : formatInputMillis(account.openingMillis)
+  return account.openingCents === null ? '' : formatInputAmount(account.openingCents)
+}
+
+function displayCents(values: readonly (number | null)[], blankZero: boolean): (number | null)[] {
+  return values.map((value) => {
+    if (value === null) return null
+    const cents = millisToCents(value)
+    return blankZero && cents === 0 ? null : cents
+  })
 }
 
 function moneyCell(cents: number): HTMLElement {

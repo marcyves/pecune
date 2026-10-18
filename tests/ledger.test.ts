@@ -115,7 +115,7 @@ describe('base', () => {
     const database = openDatabase(path)
     databases.push(database)
     const version = database.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as { value: string }
-    expect(version.value).toBe('8')
+    expect(version.value).toBe('9')
     const legacy = listAccounts(database).find((account) => account.bankName === 'Banque Postale')
     expect(legacy?.kind).toBe('epargne')
     expect(legacy?.cashMillis).toBeNull()
@@ -139,11 +139,12 @@ describe('base', () => {
     const opened = openDatabase(path)
     databases.push(opened)
     const account = listAccounts(opened).find((item) => item.id === livret.id)
-    expect(account?.openingCents).toBe(2342902)
+    expect(account?.openingCents).toBeNull()
+    expect(account?.openingMillis).toBe(23429020)
     expect(account?.openingDate).toBe('2026-01-01')
     const summary = accountSummary(opened, livret.id, 2026)
     if (summary.kind !== 'epargne') throw new Error('kind')
-    expect(summary.balances[0]).toBe(2342902)
+    expect(summary.balances[0]).toBe(23429020)
   })
 })
 
@@ -293,8 +294,13 @@ describe('règles du classeur', () => {
 
   it('efface un compte archivé et ce qu’il contient', async () => {
     const { database, dir } = tempDatabase()
-    const kept = createAccount(database, { name: 'Livret', bankName: 'BPER', kind: 'epargne' })
-    setMonthlyBalance(database, kept.id, '2026-03', 50000)
+    const kept = createAccount(database, {
+      name: 'Livret',
+      bankName: 'BPER',
+      kind: 'epargne',
+      openingCents: 50000,
+      openingDate: '2026-01-01',
+    })
     const releve = createAccount(database, {
       name: 'CCP',
       bankName: 'Banque Postale',
@@ -549,8 +555,9 @@ describe('règles du classeur', () => {
     pointOperation(database, ops.find((row) => row.label === 'AUCHAN')!.id, courses.id)
     const summary = accountSummary(database, account.id, 2026)
     if (summary.kind !== 'courant') return
-    expect(summary.expenseFamilies[0].categories[0].months[0]).toBe(-1250)
-    expect(summary.expenseFamilies[0].months[0]).toBe(1250)
+    const fraisRow = summary.expenseFamilies.find((family) => family.name === 'Frais généraux')
+    expect(fraisRow?.categories[0].months[0]).toBe(-1250)
+    expect(fraisRow?.months[0]).toBe(1250)
     expect(summary.unpointedExpense[0]).toBe(500)
     expect(summary.expenseTotals[0]).toBe(1750)
     expect(summary.incomeTotals[1]).toBe(10000)
@@ -558,7 +565,7 @@ describe('règles du classeur', () => {
     expect(summary.balances[1]).toBe(100000 - 5000 - 1750 + 10000)
     expect(summary.expenseTotals[2]).toBe(0)
     expect(summary.balances[2]).toBe(summary.balances[1])
-    expect(summary.expenseFamilies[0].categories[0].months[11]).toBe(0)
+    expect(fraisRow?.categories[0].months[11]).toBe(0)
   })
 
   it('calcule les mouvements d’un compte solde', () => {
@@ -581,26 +588,61 @@ describe('règles du classeur', () => {
     createSavingsTransfer(database, autre.id, livret.id, '2026-03-02', '50,00')
     const summary = accountSummary(database, livret.id, 2026)
     if (summary.kind !== 'epargne') throw new Error('kind')
-    expect(summary.expense[0]).toBe(10000)
+    expect(summary.expense[0]).toBe(100000)
     expect(summary.income[0]).toBeNull()
-    expect(summary.balances[0]).toBe(40000)
-    expect(summary.balances[1]).toBe(40000)
+    expect(summary.balances[0]).toBe(400000)
+    expect(summary.balances[1]).toBe(400000)
     expect(summary.expense[1]).toBeNull()
     expect(summary.income[1]).toBeNull()
     expect(summary.expense[2]).toBeNull()
-    expect(summary.income[2]).toBe(5000)
-    expect(summary.balances[2]).toBe(45000)
-    expect(summary.balances[11]).toBe(45000)
+    expect(summary.income[2]).toBe(50000)
+    expect(summary.balances[2]).toBe(450000)
+    expect(summary.balances[11]).toBe(450000)
     createSavingsMovement(database, livret.id, '2026-06-15', 'Intérêts', '12,50', 'entree')
     createSavingsMovement(database, livret.id, '2026-06-20', 'Retrait', '100,00', 'sortie')
     const moved = accountSummary(database, livret.id, 2026)
     if (moved.kind !== 'epargne') throw new Error('kind')
-    expect(moved.income[5]).toBe(1250)
-    expect(moved.expense[5]).toBe(10000)
-    expect(moved.balances[4]).toBe(45000)
-    expect(moved.balances[5]).toBe(36250)
+    expect(moved.income[5]).toBe(12500)
+    expect(moved.expense[5]).toBe(100000)
+    expect(moved.balances[4]).toBe(450000)
+    expect(moved.balances[5]).toBe(362500)
     expect(listUnpointed(database, null).some((row) => row.label === 'Intérêts')).toBe(false)
     expect(accountFigures(database, livret, '2026-06-16').currentCents).toBe(46250)
+  })
+
+  it('calcule l’épargne au millime et arrondit le total au centime', () => {
+    const { database } = tempDatabase()
+    const livret = createAccount(database, {
+      name: 'Livret A',
+      bankName: 'Banque Postale',
+      kind: 'epargne',
+      openingCents: 1000,
+      openingDate: '2026-01-01',
+    })
+    createSavingsMovement(database, livret.id, '2026-01-20', 'Intérêts', '0,005', 'entree')
+    const summary = accountSummary(database, livret.id, 2026)
+    if (summary.kind !== 'epargne') throw new Error('kind')
+    expect(summary.balances[0]).toBe(10005)
+    expect(summary.income[0]).toBe(5)
+    expect(accountFigures(database, livret, '2026-01-31').currentCents).toBe(1001)
+    const shown = globalSummary(database, 2026).banks[0].accounts.find((account) => account.accountName === 'Livret A')
+    expect(shown?.balance[0]).toBe(1001)
+    expect(shown?.income[0]).toBe(1)
+
+    const down = createAccount(database, {
+      name: 'LDD',
+      bankName: 'Banque Postale',
+      kind: 'epargne',
+      openingCents: 1000,
+      openingDate: '2026-01-01',
+    })
+    createSavingsMovement(database, down.id, '2026-01-20', 'Intérêts', '0,004', 'entree')
+    const lower = accountSummary(database, down.id, 2026)
+    if (lower.kind !== 'epargne') throw new Error('kind')
+    expect(lower.balances[0]).toBe(10004)
+    expect(accountFigures(database, down, '2026-01-31').currentCents).toBe(1000)
+    const hidden = globalSummary(database, 2026).banks[0].accounts.find((account) => account.accountName === 'LDD')
+    expect(hidden?.income[0]).toBeNull()
   })
 
   it('ajoute les banques dans le tableau global et compte un virement des deux côtés', async () => {
@@ -777,7 +819,7 @@ describe('règles du classeur', () => {
     pointOperation(database, outgoing!.id, virement, livret.id)
     const savings = accountSummary(database, livret.id, 2026)
     if (savings.kind !== 'epargne') throw new Error('kind')
-    expect(savings.income[2]).toBe(4000)
+    expect(savings.income[2]).toBe(40000)
     expect(savings.expense[2]).toBeNull()
     pointOperation(database, incoming!.id, recu, autre.id)
     const mirrored = listOperations(database, autre.id, 2026)
@@ -792,7 +834,7 @@ describe('règles du classeur', () => {
     expect(back?.categoryName).toBe('Virement reçu')
     const after = accountSummary(database, livret.id, 2026)
     if (after.kind !== 'epargne') throw new Error('kind')
-    expect(after.expense[3]).toBe(1550)
+    expect(after.expense[3]).toBe(15500)
     const transfer = database
       .prepare('SELECT id FROM transfers WHERE from_account_id = ? AND amount_cents = ?')
       .get(livret.id, 1550) as { id: number }
@@ -810,11 +852,11 @@ describe('règles du classeur', () => {
     createSavingsTransfer(database, livret.id, ccp.id, '2026-10-02', '10,00')
     const moved = accountSummary(database, livret.id, 2026)
     if (moved.kind !== 'epargne') throw new Error('kind')
-    expect(moved.balances[8]).toBe(100000)
-    expect(moved.balances[9]).toBe(99000)
-    expect(moved.expense[9]).toBe(1000)
-    expect(moved.balances[10]).toBe(99000)
-    expect(moved.balances[11]).toBe(99000)
+    expect(moved.balances[8]).toBe(1000000)
+    expect(moved.balances[9]).toBe(990000)
+    expect(moved.expense[9]).toBe(10000)
+    expect(moved.balances[10]).toBe(990000)
+    expect(moved.balances[11]).toBe(990000)
     expect(accountFigures(database, livret, '2026-10-17').currentCents).toBe(99000)
   })
 

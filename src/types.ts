@@ -22,6 +22,7 @@ export type Account = {
   archived: boolean
   mapping: Mapping | null
   openingCents: number | null
+  openingMillis: number | null
   openingDate: string | null
   cashMillis: number | null
   cashValuedOn: string | null

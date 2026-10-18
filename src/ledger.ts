@@ -2,7 +2,7 @@ import { basename } from 'node:path'
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite'
 import { isoDate, lastDay, monthEntirelyBefore, todayIso } from './dates.ts'
 import { LedgerError } from './errors.ts'
-import { lineMillis, parseQuantity, parseUserAmount, parseUserMillis } from './money.ts'
+import { lineMillis, millisToCents, parseQuantity, parseUserAmount, parseUserMillis } from './money.ts'
 import { classifyImport, operationKey, readTabularFile } from './parse-file.ts'
 import { globalFromAccounts, statementSummary } from './summary.ts'
 import type {
@@ -35,24 +35,30 @@ export function createAccount(
     kind: AccountKind
     mapping?: Mapping | null
     openingCents?: number | null
+    openingMillis?: number | null
     openingDate?: string | null
   },
 ): Account {
   const name = requiredName(input.name, 'Le nom du compte est requis.')
   const bankId = ensureBank(database, input.bankName)
   const mapping = normalizeMapping(input.mapping ?? null)
-  const opening = normalizeOpening(input.openingCents ?? null, input.openingDate ?? null)
   if (input.kind !== 'courant' && input.kind !== 'epargne' && input.kind !== 'titre') throw new LedgerError('Type de compte inconnu.')
+  const opening = openingForKind(input.kind, input.openingCents ?? null, input.openingMillis, input.openingDate ?? null)
   assertAccountName(database, name, bankId)
-  const result = insert(database, 'INSERT INTO accounts (name, bank_id, kind, mapping_json, opening_cents, opening_date, cash_millis) VALUES (?, ?, ?, ?, ?, ?, ?)', [
-    name,
-    bankId,
-    input.kind,
-    input.kind === 'courant' && mapping ? JSON.stringify(mapping) : null,
-    input.kind === 'courant' || input.kind === 'epargne' ? opening.cents : null,
-    input.kind === 'courant' || input.kind === 'epargne' ? opening.date : null,
-    input.kind === 'titre' ? 0 : null,
-  ])
+  const result = insert(
+    database,
+    'INSERT INTO accounts (name, bank_id, kind, mapping_json, opening_cents, opening_millis, opening_date, cash_millis) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    [
+      name,
+      bankId,
+      input.kind,
+      input.kind === 'courant' && mapping ? JSON.stringify(mapping) : null,
+      opening.cents,
+      opening.millis,
+      opening.date,
+      input.kind === 'titre' ? 0 : null,
+    ],
+  )
   return getAccount(database, result)
 }
 
@@ -65,6 +71,7 @@ export function updateAccount(
     archived: boolean
     mapping: Mapping | null
     openingCents: number | null
+    openingMillis?: number | null
     openingDate: string | null
   },
 ): Account {
@@ -72,20 +79,21 @@ export function updateAccount(
   const name = requiredName(input.name, 'Le nom du compte est requis.')
   const bankId = ensureBank(database, input.bankName)
   const mapping = normalizeMapping(input.mapping)
-  const opening = normalizeOpening(input.openingCents, input.openingDate)
+  const opening = openingForKind(current.kind, input.openingCents, input.openingMillis, input.openingDate)
   assertAccountName(database, name, bankId, id)
   run(
     database,
     `UPDATE accounts
-     SET name = ?, bank_id = ?, archived = ?, mapping_json = ?, opening_cents = ?, opening_date = ?
+     SET name = ?, bank_id = ?, archived = ?, mapping_json = ?, opening_cents = ?, opening_millis = ?, opening_date = ?
      WHERE id = ?`,
     [
       name,
       bankId,
       input.archived ? 1 : 0,
       current.kind === 'courant' && mapping ? JSON.stringify(mapping) : null,
-      current.kind === 'courant' || current.kind === 'epargne' ? opening.cents : null,
-      current.kind === 'courant' || current.kind === 'epargne' ? opening.date : null,
+      opening.cents,
+      opening.millis,
+      opening.date,
       id,
     ],
   )
@@ -108,7 +116,12 @@ export function accountFigures(
     return { currentCents: millisToCents(totalMillis), unpointedCents: null, securitiesMillis }
   }
   if (account.kind === 'epargne') {
-    return { currentCents: savingsBalanceAsOf(database, account.id, asOf), unpointedCents: null, securitiesMillis: null }
+    const millis = savingsBalanceAsOf(database, account.id, asOf)
+    return {
+      currentCents: millis === null ? null : millisToCents(millis),
+      unpointedCents: null,
+      securitiesMillis: null,
+    }
   }
   const unpointed = one(
     database,
@@ -502,7 +515,7 @@ export function createSavingsMovement(
   const account = getAccount(database, accountId)
   if (account.kind !== 'epargne') throw new LedgerError('Ce compte n’est pas un compte d’épargne.')
   if (direction !== 'entree' && direction !== 'sortie') throw new LedgerError('Choisis une entrée ou une sortie.')
-  const amount = centsFromInput(rawAmount)
+  const amount = millisFromOptional(rawAmount)
   if (amount === null || amount <= 0) throw new LedgerError('Le montant doit être positif.')
   const name = label.trim() || 'Mouvement'
   insert(
@@ -559,7 +572,8 @@ export function updateManualOperation(
   rawAmount: string,
 ): void {
   const operation = manualOperation(database, operationId)
-  const amount = centsFromInput(rawAmount)
+  const savings = operation.kind === 'epargne'
+  const amount = savings ? millisFromOptional(rawAmount) : centsFromInput(rawAmount)
   if (amount === null || amount === 0) throw new LedgerError('Le montant est requis.')
   const nextDate = transferDate(date)
   const name = requiredName(label, 'Le libellé est requis.')
@@ -749,7 +763,12 @@ export function globalSummary(database: DatabaseSync, year: number): GlobalSumma
         return { ...row, expense: empty(), income: empty(), balance }
       }
       if (summary.kind === 'epargne') {
-        return { ...row, expense: summary.expense, income: summary.income, balance: summary.balances }
+        return {
+          ...row,
+          expense: summary.expense.map(displayedSavingsTotal),
+          income: summary.income.map(displayedSavingsTotal),
+          balance: summary.balances.map((value) => (value === null ? null : millisToCents(value))),
+        }
       }
       return { ...row, expense: summary.expenseTotals, income: summary.incomeTotals, balance: summary.balances }
     }),
@@ -988,7 +1007,12 @@ function matchingLines(
 }
 
 function manualOperation(database: DatabaseSync, operationId: number): Row {
-  const operation = one(database, 'SELECT id, date, amount_cents, batch_id FROM operations WHERE id = ?', [operationId])
+  const operation = one(
+    database,
+    `SELECT o.id, o.date, o.amount_cents, o.batch_id, a.kind
+     FROM operations o JOIN accounts a ON a.id = o.account_id WHERE o.id = ?`,
+    [operationId],
+  )
   if (!operation) throw new LedgerError('Opération introuvable.')
   if (operation.batch_id !== null) throw new LedgerError('Une ligne importée ne se modifie pas.')
   return operation
@@ -1050,9 +1074,9 @@ function savingsFigures(database: DatabaseSync, accountId: number, year: number)
   const balances: (number | null)[] = []
   const expense: (number | null)[] = []
   const income: (number | null)[] = []
-  const openingCents = account.openingCents
+  const openingMillis = account.openingMillis
   const openingDate = account.openingDate
-  const hasOpening = openingCents !== null && openingDate !== null
+  const hasOpening = openingMillis !== null && openingDate !== null
   for (let month = 1; month <= 12; month += 1) {
     const end = lastDay(year, month)
     const monthStart = `${year}-${String(month).padStart(2, '0')}-01`
@@ -1069,7 +1093,7 @@ function savingsFigures(database: DatabaseSync, accountId: number, year: number)
         }
       }
     }
-    balances.push(!hasOpening || closed ? null : openingCents + net)
+    balances.push(!hasOpening || closed ? null : openingMillis + net)
     expense.push(outgoing > 0 ? outgoing : null)
     income.push(incoming > 0 ? incoming : null)
   }
@@ -1083,18 +1107,18 @@ function savingsFigures(database: DatabaseSync, accountId: number, year: number)
 
 function savingsBalanceAsOf(database: DatabaseSync, accountId: number, asOf: string): number | null {
   const account = getAccount(database, accountId)
-  if (account.openingCents === null || account.openingDate === null || asOf < account.openingDate) return null
+  if (account.openingMillis === null || account.openingDate === null || asOf < account.openingDate) return null
   let net = 0
   for (const row of savingsFlows(database, accountId, asOf)) {
     if (row.date < account.openingDate || row.date > asOf) continue
     net += row.signed
   }
-  return account.openingCents + net
+  return account.openingMillis + net
 }
 
 function savingsFlows(database: DatabaseSync, accountId: number, until: string): { date: string; signed: number }[] {
   const flows = savingsTransfers(database, accountId, until).map((row) => {
-    const amount = numberValue(row.amount_cents)
+    const amount = numberValue(row.amount_cents) * 10
     let signed = 0
     if (numberValue(row.to_account_id) === accountId) signed += amount
     if (numberValue(row.from_account_id) === accountId) signed -= amount
@@ -1211,6 +1235,31 @@ function normalizeMapping(mapping: Mapping | null): Mapping | null {
   throw new LedgerError('Mode de montant inconnu.')
 }
 
+function openingForKind(
+  kind: AccountKind,
+  cents: number | null,
+  millis: number | null | undefined,
+  date: string | null,
+): { cents: number | null; millis: number | null; date: string | null } {
+  if (kind === 'titre') return { cents: null, millis: null, date: null }
+  const amount = kind === 'epargne' ? (millis !== undefined ? millis : cents === null ? null : cents * 10) : cents
+  const opening = normalizeOpening(amount, date)
+  if (kind === 'epargne') return { cents: null, millis: opening.cents, date: opening.date }
+  return { cents: opening.cents, millis: null, date: opening.date }
+}
+
+function displayedSavingsTotal(millis: number | null): number | null {
+  if (millis === null) return null
+  const cents = millisToCents(millis)
+  return cents === 0 ? null : cents
+}
+
+function millisFromOptional(raw: string): number | null {
+  const parsed = parseUserMillis(raw)
+  if (parsed === 'invalid') throw new LedgerError('Montant illisible.')
+  return parsed
+}
+
 function normalizeOpening(cents: number | null, date: string | null): { cents: number | null; date: string | null } {
   if ((cents === null) !== (date === null || date === '')) {
     throw new LedgerError('Le solde d’ouverture demande un montant et une date.')
@@ -1245,7 +1294,7 @@ function isDateFormat(value: string): value is DateFormat {
 
 function accountSelect(): string {
   return `SELECT a.id, a.name, a.bank_id, b.name AS bank_name, a.kind, a.archived,
-            a.mapping_json, a.opening_cents, a.opening_date, a.cash_millis, a.cash_valued_on
+            a.mapping_json, a.opening_cents, a.opening_millis, a.opening_date, a.cash_millis, a.cash_valued_on
      FROM accounts a JOIN banks b ON b.id = a.bank_id`
 }
 
@@ -1281,6 +1330,7 @@ function mapAccount(row: Row): Account {
     archived: numberValue(row.archived) === 1,
     mapping: row.mapping_json ? (JSON.parse(String(row.mapping_json)) as Mapping) : null,
     openingCents: row.opening_cents === null ? null : numberValue(row.opening_cents),
+    openingMillis: row.opening_millis === null || row.opening_millis === undefined ? null : numberValue(row.opening_millis),
     openingDate: row.opening_date === null ? null : String(row.opening_date),
     cashMillis: row.cash_millis === null ? null : numberValue(row.cash_millis),
     cashValuedOn: row.cash_valued_on === null ? null : String(row.cash_valued_on),
@@ -1433,9 +1483,3 @@ function securitiesBalance(database: DatabaseSync, accountId: number): number {
   )
 }
 
-function millisToCents(millis: number): number {
-  const negative = millis < 0
-  const absolute = Math.abs(millis)
-  const cents = Math.floor(absolute / 10) + (absolute % 10 >= 5 ? 1 : 0)
-  return negative ? -cents : cents
-}

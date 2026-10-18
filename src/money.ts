@@ -53,6 +53,13 @@ export function parseUserMillis(raw: string): number | null | 'invalid' {
   return scaleDecimal(raw, 3)
 }
 
+export function millisToCents(millis: number): number {
+  const negative = millis < 0
+  const absolute = Math.abs(millis)
+  const cents = Math.floor(absolute / 10) + (absolute % 10 >= 5 ? 1 : 0)
+  return negative ? -cents : cents
+}
+
 export function lineMillis(quantityMicros: number, valueMillis: number): number {
   const product = BigInt(quantityMicros) * BigInt(valueMillis)
   const scale = 1_000_000n
