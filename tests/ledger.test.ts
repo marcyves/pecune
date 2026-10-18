@@ -734,7 +734,7 @@ describe('règles du classeur', () => {
     })
     const livret = createAccount(database, { name: 'Livret A', bankName: 'Banque Postale', kind: 'epargne' })
     const autre = createAccount(database, {
-      name: 'Maria',
+      name: 'Joint',
       bankName: 'CCF',
       kind: 'courant',
       mapping: signed,
@@ -802,8 +802,8 @@ describe('règles du classeur', () => {
       openingCents: 100000,
       openingDate: '2026-01-01',
     })
-    const maria = createAccount(database, {
-      name: 'Maria',
+    const joint = createAccount(database, {
+      name: 'Joint',
       bankName: 'CCF',
       kind: 'courant',
       mapping: signed,
@@ -811,41 +811,41 @@ describe('règles du classeur', () => {
       openingDate: '2026-01-01',
     })
     const livret = createAccount(database, { name: 'Livret A', bankName: 'Banque Postale', kind: 'epargne' })
-    await confirmImport(database, ccp.id, csv(dir, 'ccp.csv', 'Date;Libelle;Montant\n10/03/2026;VIR MARIA;-40,00\n'))
-    await confirmImport(database, maria.id, csv(dir, 'maria.csv', 'Date;Libelle;Montant\n10/03/2026;VIR CCP;40,00\n12/03/2026;AUTRE;40,00\n'))
+    await confirmImport(database, ccp.id, csv(dir, 'ccp.csv', 'Date;Libelle;Montant\n10/03/2026;VIR JOINT;-40,00\n'))
+    await confirmImport(database, joint.id, csv(dir, 'joint.csv', 'Date;Libelle;Montant\n10/03/2026;VIR CCP;40,00\n12/03/2026;AUTRE;40,00\n'))
     const outgoing = listOperations(database, ccp.id, 2026)[0]
-    const received = listOperations(database, maria.id, 2026).find((row) => row.date === '2026-03-10')
-    const matches = previewOperationTransfer(database, outgoing.id, maria.id)
+    const received = listOperations(database, joint.id, 2026).find((row) => row.date === '2026-03-10')
+    const matches = previewOperationTransfer(database, outgoing.id, joint.id)
     expect(matches.map((row) => row.id)).toEqual([received!.id])
-    pointOperation(database, outgoing.id, outgoingCategory(database), maria.id, received!.id)
-    const linked = listOperations(database, maria.id, 2026)
+    pointOperation(database, outgoing.id, outgoingCategory(database), joint.id, received!.id)
+    const linked = listOperations(database, joint.id, 2026)
     expect(linked).toHaveLength(2)
     expect(linked.find((row) => row.id === received!.id)?.categoryName).toBe('Virement reçu')
     expect(linked.every((row) => row.imported)).toBe(true)
 
     unpointOperation(database, outgoing.id)
-    expect(listOperations(database, maria.id, 2026)).toHaveLength(2)
-    expect(listOperations(database, maria.id, 2026).find((row) => row.id === received!.id)?.categoryId).toBeNull()
+    expect(listOperations(database, joint.id, 2026)).toHaveLength(2)
+    expect(listOperations(database, joint.id, 2026).find((row) => row.id === received!.id)?.categoryId).toBeNull()
     expect(() => deleteManualOperation(database, received!.id)).toThrow(/importée/)
 
-    pointOperation(database, outgoing.id, outgoingCategory(database), maria.id, null)
-    const doubled = listOperations(database, maria.id, 2026)
+    pointOperation(database, outgoing.id, outgoingCategory(database), joint.id, null)
+    const doubled = listOperations(database, joint.id, 2026)
     expect(doubled).toHaveLength(3)
     const created = doubled.find((row) => !row.imported)
     expect(created?.amountCents).toBe(4000)
     expect(created?.label).toBe('Virement de CCP')
     expect(() => updateManualOperation(database, created!.id, '2026-03-11', 'Virement corrigé', '40,00')).toThrow(/pointage/)
     updateManualOperation(database, created!.id, '2026-03-10', 'Virement corrigé', '40,00')
-    expect(listOperations(database, maria.id, 2026).find((row) => row.id === created!.id)?.label).toBe('Virement corrigé')
+    expect(listOperations(database, joint.id, 2026).find((row) => row.id === created!.id)?.label).toBe('Virement corrigé')
     deleteManualOperation(database, created!.id)
-    expect(listOperations(database, maria.id, 2026)).toHaveLength(2)
+    expect(listOperations(database, joint.id, 2026)).toHaveLength(2)
     expect(listOperations(database, ccp.id, 2026)[0].categoryId).toBeNull()
 
-    const savingsMatch = previewSavingsTransfer(database, maria.id, '2026-03-10', '40,00')
+    const savingsMatch = previewSavingsTransfer(database, joint.id, '2026-03-10', '40,00')
     expect(savingsMatch.map((row) => row.id)).toEqual([received!.id])
-    createSavingsTransfer(database, livret.id, maria.id, '2026-03-10', '40,00', received!.id)
-    expect(listOperations(database, maria.id, 2026)).toHaveLength(2)
-    expect(listOperations(database, maria.id, 2026).find((row) => row.id === received!.id)?.categoryName).toBe('Virement reçu')
+    createSavingsTransfer(database, livret.id, joint.id, '2026-03-10', '40,00', received!.id)
+    expect(listOperations(database, joint.id, 2026)).toHaveLength(2)
+    expect(listOperations(database, joint.id, 2026).find((row) => row.id === received!.id)?.categoryName).toBe('Virement reçu')
   })
 })
 

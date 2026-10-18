@@ -1,8 +1,8 @@
-# Suivi des comptes familiaux
+# Suivi des comptes
 
 Date : 2026-10-15
 
-Application Electron qui remplace le classeur « Tableau dépenses et encaissements ». Elle tourne sur le Mac, hors ligne. Le code vit dans `/Users/marc/Projects/comptes-famille`, en dehors du wiki.
+Application Electron de suivi des comptes. Elle tourne sur le Mac, hors ligne.
 
 ## Périmètre
 
@@ -18,7 +18,7 @@ Cette version couvre :
 Hors de cette version :
 
 - l’immobilier et l’IFI
-- le détail des supports (Cachemire, PEA, ligne par ligne). Plus tard, une liste de positions pourra s’ajouter à un compte sans modifier les opérations ni les soldes
+- le détail des supports d’investissement, ligne par ligne. Plus tard, une liste de positions pourra s’ajouter à un compte sans modifier les opérations ni les soldes
 - la suppression définitive d’un compte, d’une catégorie ou d’une opération isolée
 - une devise autre que l’euro
 
@@ -28,7 +28,7 @@ La fenêtre Electron affiche les écrans et envoie des actions. Le processus pri
 
 Une seule base couvre toutes les années. Les tableaux affichent une année à la fois.
 
-Le fichier de base est dans les données de l’application sur le Mac. Il n’est pas dans Dropbox. Une action « Exporter une copie » écrit un second fichier à l’emplacement choisi. Si le fichier de base ne s’ouvre pas, l’application le dit et n’en crée pas un vide à la place. L’utilisateur désigne le fichier existant, ou crée une base nouvelle par une action explicite.
+Le fichier de base est dans les données de l’application sur le Mac. Une action « Exporter une copie » écrit un second fichier à l’emplacement choisi. Si le fichier de base ne s’ouvre pas, l’application le dit et n’en crée pas un vide à la place. L’utilisateur désigne le fichier existant, ou crée une base nouvelle par une action explicite.
 
 ## Données
 

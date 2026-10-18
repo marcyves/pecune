@@ -429,17 +429,26 @@ td.num button.amount {
 .account-list { display: grid; gap: 1.1rem; }
 
 .bank-head {
+  margin: 0 0 0.55rem;
+}
+
+.bank-title {
+  display: grid;
+  gap: 0.1rem;
+  justify-items: start;
+}
+
+.bank-name {
   display: flex;
   align-items: center;
   gap: 0.45rem;
-  margin: 0 0 0.55rem;
 }
 
 .bank-head h2 { margin: 0; }
 
 .bank-total {
-  margin-left: auto;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .accounts-total {

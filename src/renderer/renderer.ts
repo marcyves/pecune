@@ -245,7 +245,7 @@ function setupScreen(): HTMLElement {
     el(
       'p',
       '',
-      'Les comptes de la famille, sur ce Mac. La base reste dans les données de l’application, sauf si tu choisis un autre fichier.',
+      'Les comptes, sur ce Mac. La base reste dans les données de l’application, sauf si tu choisis un autre fichier.',
     ),
   )
   if (notice || status.state === 'error') {
@@ -382,7 +382,9 @@ function renderAccounts(): HTMLElement {
   for (const [bankName, items] of groups) {
     const group = el('section')
     const head = el('div', 'bank-head')
-    head.append(el('h2', '', bankName), plusButton('Nouveau compte', () => startNewAccount(bankName)), totalLine('Solde', items))
+    const name = el('div', 'bank-name')
+    name.append(el('h2', '', bankName), plusButton('Nouveau compte', () => startNewAccount(bankName)))
+    head.append(el('div', 'bank-title', name, totalLine('Solde', items)))
     const row = el('div', 'account-bank')
     group.append(head, row)
     list.append(group)

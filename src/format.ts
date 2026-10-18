@@ -13,13 +13,18 @@ export const MONTH_LABELS = [
   'Décembre',
 ]
 
+const THOUSANDS = '\u00a0'
+
+export function groupThousands(whole: string): string {
+  return whole.replace(/\B(?=(\d{3})+(?!\d))/g, THOUSANDS)
+}
+
 export function formatEuros(cents: number): string {
   const negative = cents < 0
   const absolute = Math.abs(cents)
   const euros = Math.floor(absolute / 100)
   const rest = String(absolute % 100).padStart(2, '0')
-  const grouped = String(euros).replace(/\B(?=(\d{3})+(?!\d))/g, '\u202f')
-  return `${negative ? '−' : ''}${grouped},${rest}`
+  return `${negative ? '−' : ''}${groupThousands(String(euros))},${rest}`
 }
 
 export function formatInputAmount(cents: number): string {
@@ -35,8 +40,7 @@ export function formatMillis(millis: number): string {
   const absolute = Math.abs(millis)
   const euros = Math.floor(absolute / 1000)
   const rest = String(absolute % 1000).padStart(3, '0')
-  const grouped = String(euros).replace(/\B(?=(\d{3})+(?!\d))/g, '\u202f')
-  return `${negative ? '−' : ''}${grouped},${rest}`
+  return `${negative ? '−' : ''}${groupThousands(String(euros))},${rest}`
 }
 
 export function formatInputMillis(millis: number): string {

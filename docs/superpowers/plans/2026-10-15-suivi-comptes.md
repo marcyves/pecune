@@ -10,11 +10,10 @@
 
 ## Global Constraints
 
-- Code dans `/Users/marc/Projects/comptes-famille`, hors du wiki.
 - Une base pour toutes les années. Les tableaux affichent une année.
 - Montants en euros, stockés en centimes. Dépense négative, encaissement positif.
 - Pas d’immobilier, pas de lignes de supports, pas de suppression définitive, pas d’autre devise.
-- La base vit dans les données de l’application. Pas dans Dropbox.
+- La base vit dans les données de l’application.
 - Si le fichier ne s’ouvre pas, ne pas créer une base vide à la place.
 - L’ouverture d’une base est explicite (créer ou désigner).
 

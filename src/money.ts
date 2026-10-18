@@ -1,3 +1,4 @@
+import { groupThousands } from './format.ts'
 import type { DecimalSeparator } from './types.ts'
 
 export function parseAmount(raw: string, decimal: DecimalSeparator): number | null {
@@ -80,5 +81,6 @@ export function formatQuantity(micros: number): string {
   const absolute = Math.abs(micros)
   const whole = Math.floor(absolute / QUANTITY_SCALE)
   const frac = String(absolute % QUANTITY_SCALE).padStart(6, '0').replace(/0+$/, '')
-  return `${negative ? '-' : ''}${frac ? `${whole},${frac}` : String(whole)}`
+  const grouped = groupThousands(String(whole))
+  return `${negative ? '-' : ''}${frac ? `${grouped},${frac}` : grouped}`
 }
