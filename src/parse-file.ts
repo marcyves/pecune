@@ -63,8 +63,12 @@ export function classifyImport(input: {
   return { lines }
 }
 
+export function normalizeLabel(label: string): string {
+  return label.replace(/\s+/g, ' ').trim()
+}
+
 export function operationKey(date: string, label: string, amountCents: number): string {
-  return `${date}\t${label}\t${amountCents}`
+  return `${date}\t${normalizeLabel(label)}\t${amountCents}`
 }
 
 export function requiredHeaders(mapping: Mapping): string[] {
@@ -210,7 +214,7 @@ function readRow(
   | { ok: false; reason: string; partial: Partial<PreviewLine> }
   | { ok: true; date: string; label: string; amountCents: number } {
   const dateCell = field(row, index, mapping.dateHeader)
-  const label = field(row, index, mapping.labelHeader).text.trim()
+  const label = normalizeLabel(field(row, index, mapping.labelHeader).text)
   const date = resolveDate(dateCell, mapping)
   if (!date) return { ok: false, reason: 'Date illisible', partial: { label } }
 

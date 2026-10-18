@@ -882,7 +882,8 @@ function existingCounts(database: DatabaseSync, accountId: number): Map<string, 
   )
   const counts = new Map<string, number>()
   for (const row of rows) {
-    counts.set(operationKey(String(row.date), String(row.label), numberValue(row.amount_cents)), numberValue(row.count))
+    const key = operationKey(String(row.date), String(row.label), numberValue(row.amount_cents))
+    counts.set(key, (counts.get(key) ?? 0) + numberValue(row.count))
   }
   return counts
 }

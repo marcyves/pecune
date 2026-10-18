@@ -376,6 +376,9 @@ describe('règles du classeur', () => {
     const second = await confirmImport(database, split.id, other)
     expect(listOperations(database, split.id, 2026)[0].amountCents).toBe(-1250)
 
+    const spaced = csv(dir, 'espaces.csv', 'Date;Libelle;Montant\n10/01/2026;AUCHAN\u00a0;-12,50\n')
+    await expect(confirmImport(database, account.id, spaced)).rejects.toThrow(/Aucune ligne/)
+
     const removed = cancelBatch(database, imported.batchId)
     expect(removed).toBe(2)
     expect(operationCount(database, account.id)).toBe(0)
