@@ -111,9 +111,12 @@ export function accountFigures(
   asOf: string,
 ): { currentCents: number | null; unpointedCents: number | null; securitiesMillis: number | null } {
   if (account.kind === 'titre') {
-    const securitiesMillis = securitiesBalance(database, account.id)
-    const totalMillis = securitiesMillis + (account.cashMillis ?? 0)
-    return { currentCents: millisToCents(totalMillis), unpointedCents: null, securitiesMillis }
+    const millis = titreBalanceAsOf(database, account, asOf)
+    return {
+      currentCents: millis === null ? null : millisToCents(millis),
+      unpointedCents: null,
+      securitiesMillis: securitiesBalance(database, account.id),
+    }
   }
   if (account.kind === 'epargne') {
     const millis = savingsBalanceAsOf(database, account.id, asOf)
@@ -189,6 +192,7 @@ export function moveFamily(database: DatabaseSync, id: number, direction: -1 | 1
 export function createCategory(database: DatabaseSync, input: { name: string; familyId: number }): Category {
   familyById(database, input.familyId)
   const name = requiredName(input.name, 'Le nom de la catégorie est requis.')
+  assertCategoryName(database, input.familyId, name)
   const order = nextOrder(
     database,
     'SELECT COALESCE(MAX(sort_order), 0) AS value FROM categories WHERE family_id = ?',
@@ -210,6 +214,7 @@ export function updateCategory(
   const category = categoryById(database, id)
   const name = requiredName(input.name, 'Le nom de la catégorie est requis.')
   const familyId = input.familyId ?? category.familyId
+  assertCategoryName(database, familyId, name, id)
   if (familyId !== category.familyId) {
     const current = familyById(database, category.familyId)
     const next = familyById(database, familyId)
@@ -513,7 +518,9 @@ export function createSavingsMovement(
   direction: 'entree' | 'sortie',
 ): void {
   const account = getAccount(database, accountId)
-  if (account.kind !== 'epargne') throw new LedgerError('Ce compte n’est pas un compte d’épargne.')
+  if (account.kind !== 'epargne' && account.kind !== 'titre') {
+    throw new LedgerError('Ce compte n’accepte pas de mouvement manuel.')
+  }
   if (direction !== 'entree' && direction !== 'sortie') throw new LedgerError('Choisis une entrée ou une sortie.')
   const amount = millisFromOptional(rawAmount)
   if (amount === null || amount <= 0) throw new LedgerError('Le montant doit être positif.')
@@ -572,8 +579,8 @@ export function updateManualOperation(
   rawAmount: string,
 ): void {
   const operation = manualOperation(database, operationId)
-  const savings = operation.kind === 'epargne'
-  const amount = savings ? millisFromOptional(rawAmount) : centsFromInput(rawAmount)
+  const precise = operation.kind === 'epargne' || operation.kind === 'titre'
+  const amount = precise ? millisFromOptional(rawAmount) : centsFromInput(rawAmount)
   if (amount === null || amount === 0) throw new LedgerError('Le montant est requis.')
   const nextDate = transferDate(date)
   const name = requiredName(label, 'Le libellé est requis.')
@@ -719,6 +726,7 @@ export function accountSummary(database: DatabaseSync, accountId: number, year: 
       cashMillis,
       cashValuedOn: account.cashValuedOn,
       totalMillis: securitiesMillis + cashMillis,
+      ...titreFigures(database, account, year),
     }
   }
   if (account.kind === 'epargne') {
@@ -748,7 +756,6 @@ export function globalSummary(database: DatabaseSync, year: number): GlobalSumma
     year,
     accounts.map((account) => {
       const summary = accountSummary(database, account.id, year)
-      const empty = (): (number | null)[] => Array.from({ length: 12 }, () => null)
       const row = {
         accountId: account.id,
         accountName: account.name,
@@ -756,13 +763,7 @@ export function globalSummary(database: DatabaseSync, year: number): GlobalSumma
         bankName: account.bankName,
         kind: account.kind,
       }
-      if (summary.kind === 'titre') {
-        const balance = empty()
-        const now = new Date()
-        if (year === now.getFullYear()) balance[now.getMonth()] = millisToCents(summary.totalMillis)
-        return { ...row, expense: empty(), income: empty(), balance }
-      }
-      if (summary.kind === 'epargne') {
+      if (summary.kind === 'titre' || summary.kind === 'epargne') {
         return {
           ...row,
           expense: summary.expense.map(displayedSavingsTotal),
@@ -1068,6 +1069,70 @@ function transferEnds(database: DatabaseSync, fromAccountId: number, toAccountId
   return { from, to }
 }
 
+function titreFigures(
+  database: DatabaseSync,
+  account: Account,
+  year: number,
+): { balances: (number | null)[]; expense: (number | null)[]; income: (number | null)[] } {
+  const stored = getAccount(database, account.id)
+  const positions = listPositions(database, account.id)
+  const movements = manualFlows(database, account.id, `${year}-12-31`)
+  const balances: (number | null)[] = []
+  const expense: (number | null)[] = []
+  const income: (number | null)[] = []
+  for (let month = 1; month <= 12; month += 1) {
+    const end = lastDay(year, month)
+    const monthStart = `${year}-${String(month).padStart(2, '0')}-01`
+    const portfolio = portfolioMillis(stored, positions, end)
+    let incoming = 0
+    let outgoing = 0
+    let net = 0
+    for (const row of movements) {
+      if (row.date <= end) net += row.signed
+      if (row.date >= monthStart && row.date <= end) {
+        if (row.signed > 0) incoming += row.signed
+        if (row.signed < 0) outgoing += -row.signed
+      }
+    }
+    const started = portfolio !== null || movements.some((row) => row.date <= end)
+    balances.push(started ? (portfolio ?? 0) + net : null)
+    expense.push(outgoing > 0 ? outgoing : null)
+    income.push(incoming > 0 ? incoming : null)
+  }
+  return { balances, expense, income }
+}
+
+function titreBalanceAsOf(database: DatabaseSync, account: Account, asOf: string): number | null {
+  const stored = getAccount(database, account.id)
+  const portfolio = portfolioMillis(stored, listPositions(database, account.id), asOf)
+  const movements = manualFlows(database, account.id, asOf)
+  if (portfolio === null && movements.length === 0) return null
+  return (portfolio ?? 0) + movements.reduce((sum, row) => sum + row.signed, 0)
+}
+
+function portfolioMillis(account: Account, positions: Position[], asOf: string): number | null {
+  let total = 0
+  let started = false
+  for (const position of positions) {
+    if (!position.valuedOn || position.valuedOn > asOf) continue
+    total += lineMillis(position.quantityMicros, position.valueMillis)
+    started = true
+  }
+  if (account.cashValuedOn && account.cashValuedOn <= asOf) {
+    total += account.cashMillis ?? 0
+    started = true
+  }
+  return started ? total : null
+}
+
+function manualFlows(database: DatabaseSync, accountId: number, until: string): { date: string; signed: number }[] {
+  return all(
+    database,
+    'SELECT date, amount_cents FROM operations WHERE account_id = ? AND date <= ?',
+    [accountId, until],
+  ).map((row) => ({ date: String(row.date), signed: numberValue(row.amount_cents) }))
+}
+
 function savingsFigures(database: DatabaseSync, accountId: number, year: number) {
   const account = getAccount(database, accountId)
   const rows = savingsFlows(database, accountId, `${year}-12-31`)
@@ -1270,6 +1335,15 @@ function normalizeOpening(cents: number | null, date: string | null): { cents: n
     throw new LedgerError('Date d’ouverture illisible.')
   }
   return { cents, date }
+}
+
+function assertCategoryName(database: DatabaseSync, familyId: number, name: string, exceptId = 0): void {
+  const existing = one(database, 'SELECT id FROM categories WHERE family_id = ? AND name = ? AND id != ?', [
+    familyId,
+    name,
+    exceptId,
+  ])
+  if (existing) throw new LedgerError('Cette famille a déjà une catégorie de ce nom.')
 }
 
 function requiredName(value: string, message: string): string {

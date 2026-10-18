@@ -37,10 +37,11 @@ CREATE TABLE families (
 CREATE TABLE categories (
   id INTEGER PRIMARY KEY,
   family_id INTEGER NOT NULL REFERENCES families(id),
-  name TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
   sort_order INTEGER NOT NULL,
   archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
-  role TEXT CHECK (role IS NULL OR role = 'virement')
+  role TEXT CHECK (role IS NULL OR role = 'virement'),
+  UNIQUE (family_id, name)
 );
 CREATE TABLE import_batches (
   id INTEGER PRIMARY KEY,
@@ -88,7 +89,7 @@ CREATE TABLE transfers (
 );
 CREATE INDEX idx_transfers_from ON transfers(from_account_id);
 CREATE INDEX idx_transfers_to ON transfers(to_account_id);
-INSERT INTO meta (key, value) VALUES ('schema_version', '9');
+INSERT INTO meta (key, value) VALUES ('schema_version', '10');
 `
 
 export function createDatabase(path: string): DatabaseSync {
@@ -123,7 +124,8 @@ function migrate(database: DatabaseSync): void {
   if (schemaVersion(database) === '6') migrateTransfers(database)
   if (schemaVersion(database) === '7') migrateSavingsOpening(database)
   if (schemaVersion(database) === '8') migrateSavingsScale(database)
-  if (schemaVersion(database) !== '9') throw new LedgerError('Ce fichier n’est pas une base Comptes.')
+  if (schemaVersion(database) === '9') migrateCategoryNames(database)
+  if (schemaVersion(database) !== '10') throw new LedgerError('Ce fichier n’est pas une base Comptes.')
 }
 
 function schemaVersion(database: DatabaseSync): string | undefined {
@@ -373,6 +375,36 @@ function migrateSavingsScale(database: DatabaseSync): void {
   }
 }
 
+function migrateCategoryNames(database: DatabaseSync): void {
+  database.exec('PRAGMA foreign_keys = OFF')
+  database.exec('BEGIN')
+  try {
+    if (tableExists(database, 'categories')) {
+      database.exec(`
+        CREATE TABLE categories_next (
+          id INTEGER PRIMARY KEY,
+          family_id INTEGER NOT NULL REFERENCES families(id),
+          name TEXT NOT NULL,
+          sort_order INTEGER NOT NULL,
+          archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
+          role TEXT CHECK (role IS NULL OR role = 'virement'),
+          UNIQUE (family_id, name)
+        );
+        INSERT INTO categories_next (id, family_id, name, sort_order, archived, role)
+          SELECT id, family_id, name, sort_order, archived, role FROM categories;
+        DROP TABLE categories;
+        ALTER TABLE categories_next RENAME TO categories;
+      `)
+    }
+    database.exec(`UPDATE meta SET value = '10' WHERE key = 'schema_version'`)
+    database.exec('COMMIT')
+  } catch (error) {
+    database.exec('ROLLBACK')
+    throw error
+  }
+  database.exec('PRAGMA foreign_keys = ON')
+}
+
 function tableExists(database: DatabaseSync, name: string): boolean {
   return Boolean(database.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(name))
 }
@@ -417,7 +449,7 @@ function ensureTransferCategory(
         .lastInsertRowid,
     )
   }
-  const taken = database.prepare(`SELECT id FROM categories WHERE name = ?`).get(categoryName)
+  const taken = database.prepare(`SELECT id FROM categories WHERE family_id = ? AND name = ?`).get(familyId, categoryName)
   const usableCategory = taken ? `${categoryName} interne` : categoryName
   database
     .prepare(`INSERT INTO categories (family_id, name, sort_order, role) VALUES (?, ?, 1, 'virement')`)
@@ -437,7 +469,7 @@ export function assertDatabase(path: string): void {
     const row = database.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as
       | { value: string }
       | undefined
-    if (!row || !['1', '2', '3', '4', '5', '6', '7', '8', '9'].includes(row.value)) throw new LedgerError('Ce fichier n’est pas une base Comptes.')
+    if (!row || !['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'].includes(row.value)) throw new LedgerError('Ce fichier n’est pas une base Comptes.')
   } catch (error) {
     if (error instanceof LedgerError) throw error
     throw new LedgerError('La base ne s’ouvre pas.')

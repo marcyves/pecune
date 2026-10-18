@@ -117,6 +117,9 @@ export type HoldingsSummary = {
   cashMillis: number
   cashValuedOn: string | null
   totalMillis: number
+  balances: (number | null)[]
+  expense: (number | null)[]
+  income: (number | null)[]
 }
 
 export type AccountSummary = StatementSummary | BalanceSummary | HoldingsSummary

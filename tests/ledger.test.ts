@@ -115,7 +115,7 @@ describe('base', () => {
     const database = openDatabase(path)
     databases.push(database)
     const version = database.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as { value: string }
-    expect(version.value).toBe('9')
+    expect(version.value).toBe('10')
     const legacy = listAccounts(database).find((account) => account.bankName === 'Banque Postale')
     expect(legacy?.kind).toBe('epargne')
     expect(legacy?.cashMillis).toBeNull()
@@ -206,7 +206,7 @@ describe('règles du classeur', () => {
     expect(withCash.cashValuedOn).toBe('2026-10-16')
     expect(withCash.totalMillis).toBe(291_500)
     const empty = createAccount(database, { name: 'Vide', bankName: 'Boursorama', kind: 'titre' })
-    expect(accountFigures(database, empty, '2026-10-17').currentCents).toBe(0)
+    expect(accountFigures(database, empty, '2026-10-17').currentCents).toBeNull()
     expect(() => savePosition(database, { accountId: account.id, name: ' ', quantity: '1', value: '1', valuedOn: '2026-10-16' })).toThrow(/nom/)
     expect(() => savePosition(database, { accountId: account.id, name: 'X', quantity: '0', value: '1', valuedOn: '2026-10-16' })).toThrow(/Nombre/)
     expect(() => savePosition(database, { accountId: account.id, name: 'X', quantity: '1', value: '-1', valuedOn: '2026-10-16' })).toThrow(/négative/)
@@ -252,8 +252,8 @@ describe('règles du classeur', () => {
     const row = global.banks[0]?.accounts.find((item) => item.accountName === 'PEA')
     expect(row?.expense.every((value) => value === null)).toBe(true)
     expect(row?.income.every((value) => value === null)).toBe(true)
-    expect(row?.balance[new Date().getMonth()]).toBe(11_150)
-    expect(row?.balance.filter((_, index) => index !== new Date().getMonth()).every((value) => value === null)).toBe(true)
+    expect(row?.balance.slice(0, 9).every((value) => value === null)).toBe(true)
+    expect(row?.balance.slice(9).every((value) => value === 11_150)).toBe(true)
     const past = globalSummary(database, year - 1)
     const old = past.banks[0]?.accounts.find((item) => item.accountName === 'PEA')
     expect(old?.balance.every((value) => value === null)).toBe(true)
@@ -450,6 +450,27 @@ describe('règles du classeur', () => {
     expect(() => updateCategory(database, auchan.id, { name: 'Auchan', archived: false, familyId: salaires.id })).toThrow(
       LedgerError,
     )
+  })
+
+  it('autorise le même nom dans deux familles, pas dans la même', () => {
+    const { database } = tempDatabase()
+    const courses = createFamily(database, { name: 'Courses', nature: 'depense' })
+    const maison = createFamily(database, { name: 'Maison', nature: 'depense' })
+    const auchan = createCategory(database, { name: 'Auchan', familyId: courses.id })
+    const homonym = createCategory(database, { name: 'Auchan', familyId: maison.id })
+    expect(homonym.familyId).toBe(maison.id)
+    expect(() => createCategory(database, { name: 'Auchan', familyId: courses.id })).toThrow(/cette famille/i)
+    const loyer = createCategory(database, { name: 'Loyer', familyId: maison.id })
+    expect(() => updateCategory(database, loyer.id, { name: 'Auchan', archived: false, familyId: maison.id })).toThrow(
+      /cette famille/i,
+    )
+    expect(() => updateCategory(database, auchan.id, { name: 'Auchan', archived: false, familyId: maison.id })).toThrow(
+      /cette famille/i,
+    )
+    expect(listFamilies(database).find((family) => family.id === maison.id)?.categories.map((category) => category.name)).toEqual([
+      'Auchan',
+      'Loyer',
+    ])
   })
 
   it('suggère par mot-clé quand le libellé change autour du commerçant', async () => {
@@ -722,10 +743,40 @@ describe('règles du classeur', () => {
     expect(savings?.expense[typedMonth]).toBeNull()
     expect(securities?.expense.every((value) => value === null)).toBe(true)
     expect(securities?.income.every((value) => value === null)).toBe(true)
-    expect(securities?.balance[now.getMonth()]).toBe(2026)
-    expect(securities?.balance.filter((_, index) => index !== now.getMonth()).every((value) => value === null)).toBe(true)
+    expect(securities?.balance.slice(0, now.getMonth()).every((value) => value === null)).toBe(true)
+    expect(securities?.balance.slice(now.getMonth()).every((value) => value === 2026)).toBe(true)
     expect(globalSummary(database, year - 1).banks[0].accounts.find((account) => account.accountName === 'PEA')?.balance.every((value) => value === null)).toBe(true)
-    if (typedMonth !== now.getMonth()) expect(global.balance[typedMonth]).toBe(45000)
+    if (typedMonth < now.getMonth()) expect(global.balance[typedMonth]).toBe(45000)
+  })
+
+  it('reporte le solde d’un compte titre et y ajoute les mouvements', () => {
+    const { database } = tempDatabase()
+    const pea = createAccount(database, { name: 'PEA', bankName: 'Banque Postale', kind: 'titre' })
+    savePosition(database, {
+      accountId: pea.id,
+      name: 'Air Liquide',
+      quantity: '2',
+      value: '10,125',
+      valuedOn: '2026-03-01',
+    })
+    setCash(database, pea.id, '0,005', '2026-03-01')
+    createSavingsMovement(database, pea.id, '2026-06-15', 'Dividende', '1,50', 'entree')
+    const summary = accountSummary(database, pea.id, 2026)
+    if (summary.kind !== 'titre') throw new Error('kind')
+    expect(summary.balances.slice(0, 2).every((value) => value === null)).toBe(true)
+    expect(summary.balances[2]).toBe(20255)
+    expect(summary.balances[4]).toBe(20255)
+    expect(summary.balances[5]).toBe(21755)
+    expect(summary.income[5]).toBe(1500)
+    expect(summary.balances[11]).toBe(21755)
+    const shown = globalSummary(database, 2026).banks[0].accounts[0]
+    expect(shown.balance[1]).toBeNull()
+    expect(shown.balance[2]).toBe(2026)
+    expect(shown.balance[5]).toBe(2176)
+    expect(shown.income[5]).toBe(150)
+    expect(accountFigures(database, pea, '2026-05-01').currentCents).toBe(2026)
+    expect(accountFigures(database, pea, '2026-06-15').currentCents).toBe(2176)
+    expect(accountFigures(database, pea, '2026-02-01').currentCents).toBeNull()
   })
 
   it('calcule le solde courant et le solde non pointé', async () => {

@@ -394,9 +394,7 @@ function renderAccounts(): HTMLElement {
       top.append(el('strong', '', account.name), el('span', 'muted', kindLabel(account.kind)))
       const figures = el('div', 'account-figures')
       if (account.kind === 'titre') {
-        const securities = account.securitiesMillis
-        const global = securities === null ? null : securities + (account.cashMillis ?? 0)
-        figures.append(figureMillis('Solde des titres', securities), figureMillis('Solde global', global))
+        figures.append(figureMillis('Solde des titres', account.securitiesMillis), figure('Solde', account.currentCents))
       } else {
         figures.append(figure('Solde courant', account.currentCents), figure('Solde non pointé', account.unpointedCents))
       }
@@ -569,7 +567,11 @@ function renderSummary(summary: AccountSummary, account: Account): HTMLElement {
     page.append(balanceEditor(account, summary), movementEditor(account), transferEditor(account))
     return page
   }
-  if (summary.kind === 'titre') return holdingsEditor(account, summary)
+  if (summary.kind === 'titre') {
+    const page = el('div')
+    page.append(holdingsEditor(account, summary), titreBalance(summary), movementEditor(account))
+    return page
+  }
   return statementView(summary)
 }
 
@@ -654,6 +656,21 @@ function holdingsEditor(account: Account, summary: HoldingsSummary): HTMLElement
     }),
   )
   card.append(add)
+  return card
+}
+
+function titreBalance(summary: HoldingsSummary): HTMLElement {
+  const card = el('section', 'card')
+  card.append(el('h2', '', `Soldes ${year}`))
+  card.append(el('p', 'muted', 'Le solde part de la valorisation à sa date, puis des mouvements. Il est reporté les mois suivants, et affiché au centime.'))
+  const table = el('table', 'grid')
+  table.append(monthHead())
+  table.append(
+    amountRow('Solde', displayCents(summary.balances, false), ''),
+    amountRow('Dépense', displayCents(summary.expense, true), ''),
+    amountRow('Encaissement', displayCents(summary.income, true), ''),
+  )
+  card.append(wrap(table))
   return card
 }
 
@@ -904,7 +921,15 @@ async function saveOpening(account: Account, amount: string, date: string): Prom
 function movementEditor(account: Account): HTMLElement {
   const card = el('section', 'card')
   card.append(el('h2', '', 'Mouvements'))
-  card.append(el('p', 'muted', 'Intérêts, versement ou retrait. Le solde est recalculé.'))
+  card.append(
+    el(
+      'p',
+      'muted',
+      account.kind === 'titre'
+        ? 'Dividende, versement ou retrait. Le solde reporté en tient compte.'
+        : 'Intérêts, versement ou retrait. Le solde est recalculé.',
+    ),
+  )
   const date = dateInput(todayIso())
   const label = textInput('')
   label.placeholder = 'Libellé'
