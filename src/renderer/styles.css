@@ -72,6 +72,36 @@ h1, h2, h3 {
 }
 
 h1 { font-size: 1.8rem; }
+
+.account-title {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.account-title h1 {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 0.65rem;
+}
+
+.account-title .bank { font-size: 1em; }
+
+.section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem 1rem;
+  margin-bottom: 0.7rem;
+}
+
+.section-head h2 { margin: 0; }
+
+.account-balances h2.balance-next { margin-top: 1.15rem; }
 h2 { font-size: 1.25rem; }
 
 .app {

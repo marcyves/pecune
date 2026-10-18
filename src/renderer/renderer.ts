@@ -4,7 +4,6 @@ import { formatQuantity, lineMillis, millisToCents } from '../money.ts'
 import type {
   Account,
   AccountSummary,
-  BalanceSummary,
   BatchView,
   CategoryRow,
   Family,
@@ -128,6 +127,7 @@ let unpointed: UnpointedView[] = []
 let pointFilter: number | null = null
 let editingOperationId: number | null = null
 let globalView: 'balance' | 'expense' | 'income' = 'balance'
+let accountTab: 'depense' | 'encaissement' | 'operations' = 'depense'
 let notice = ''
 let importFile: string | null = null
 let importSheet = ''
@@ -418,9 +418,7 @@ function renderAccount(): HTMLElement {
   const page = el('div')
   const account = detail?.account ?? null
   const creating = editing && !account
-  page.append(el('h1', '', creating ? 'Nouveau compte' : (account?.name ?? 'Compte')))
-  if (account) page.append(el('p', 'muted', account.bankName))
-  page.append(button('Retour aux comptes', 'link', () => go('accounts')))
+  page.append(accountHeading(account, creating))
   if (creating || editing) page.append(accountForm(account))
   if (!account || !detail) return page
   const tools = el('div', 'toolbar')
@@ -431,15 +429,134 @@ function renderAccount(): HTMLElement {
   if (account.archived) {
     tools.append(button('Effacer', 'danger', () => eraseAccount(account)))
   }
-  if (account.kind === 'courant') tools.append(button('Importer un relevé', 'primary', () => startImport(account.id)))
   page.append(tools)
-  if (preview && importFile) page.append(renderPreview(account.id))
-  page.append(renderSummary(detail.summary, account))
+  page.append(accountHeadingFigures(account, detail.summary))
   if (account.kind === 'courant') {
-    page.append(renderBatches(detail.batches))
-    page.append(renderOperations(detail.operations, account.id))
+    page.append(renderBatches(detail.batches, account))
+    if (preview && importFile) page.append(renderPreview(account.id))
   }
+  page.append(accountTabs(account, detail.summary))
   return page
+}
+
+function accountHeading(account: Account | null, creating: boolean): HTMLElement {
+  const title = el('div', 'account-title')
+  const heading = el('h1')
+  if (creating) heading.append('Nouveau compte')
+  else {
+    heading.append(account?.name ?? 'Compte')
+    if (account) heading.append(el('span', 'bank', account.bankName))
+  }
+  title.append(glyphButton('Retour aux comptes', 'back', () => { void go('accounts') }), heading)
+  return title
+}
+
+function accountHeadingFigures(account: Account, summary: AccountSummary): HTMLElement {
+  const box = el('div')
+  if (summary.kind === 'titre') box.append(holdingsEditor(account, summary))
+  const card = el('section', 'card account-balances')
+  if (summary.kind !== 'titre') {
+    card.append(el('h2', '', 'Solde d’ouverture'))
+    card.append(openingBlock(account, summary))
+  }
+  card.append(el('h2', summary.kind === 'titre' ? '' : 'balance-next', 'Solde à date'))
+  if (summary.kind === 'epargne') {
+    card.append(el('p', 'muted', 'Le solde de fin de mois part du solde initial, des mouvements et des virements. Les totaux sont arrondis au centime.'))
+  }
+  if (summary.kind === 'titre') {
+    card.append(el('p', 'muted', 'Le solde part de la valorisation à sa date, puis des mouvements. Il est reporté les mois suivants, et affiché au centime.'))
+  }
+  const values = summary.kind === 'courant' ? summary.balances : displayCents(summary.balances, false)
+  card.append(monthTable('Solde', values, 'total'))
+  box.append(card)
+  return box
+}
+
+function openingBlock(account: Account, summary: AccountSummary): HTMLElement {
+  if (summary.kind === 'courant') {
+    if (summary.balanceMissing) return el('p', 'banner', 'Solde d’ouverture manquant. Les soldes ne sont pas calculés.')
+    return el('p', '', `${formatEuros(summary.openingCents ?? 0)} au ${formatIsoDate(summary.openingDate ?? '')}`)
+  }
+  if (summary.kind !== 'epargne') return el('div')
+  if (account.openingMillis === null || !account.openingDate) {
+    const box = el('div')
+    box.append(el('p', 'banner', 'Solde initial manquant. Les soldes ne sont pas calculés.'))
+    box.append(openingForm(account))
+    return box
+  }
+  return openingForm(account)
+}
+
+function openingForm(account: Account): HTMLElement {
+  const box = el('div')
+  const amount = amountInput(account.openingMillis === null ? '' : formatInputMillis(account.openingMillis))
+  amount.placeholder = '0,000'
+  const date = dateInput(account.openingDate ?? '')
+  const form = el('div', 'form-row')
+  form.append(labeled('Solde initial', amount), labeled('Date', date))
+  box.append(form)
+  box.append(
+    button('Enregistrer', 'primary', () => {
+      void saveOpening(account, amount.value, date.value)
+    }),
+  )
+  return box
+}
+
+function accountTabs(account: Account, summary: AccountSummary): HTMLElement {
+  const page = el('div')
+  const tabs = el('div', 'tabs')
+  for (const [id, label] of [
+    ['depense', 'Dépenses'],
+    ['encaissement', 'Encaissements'],
+    ['operations', 'Opérations'],
+  ] as const) {
+    tabs.append(
+      button(label, accountTab === id ? 'active' : '', () => selectAccountTab(id)),
+    )
+  }
+  page.append(tabs)
+  if (accountTab === 'depense') page.append(naturePane(summary, 'depense'))
+  if (accountTab === 'encaissement') page.append(naturePane(summary, 'encaissement'))
+  if (accountTab === 'operations') page.append(operationsPane(account))
+  return page
+}
+
+function selectAccountTab(next: 'depense' | 'encaissement' | 'operations'): void {
+  accountTab = next
+  if (next === 'operations' || (drill && drill.nature !== next)) drill = null
+  render()
+}
+
+function naturePane(summary: AccountSummary, nature: Nature): HTMLElement {
+  const card = el('section', 'card')
+  if (summary.kind === 'courant') {
+    if (nature === 'depense') {
+      card.append(categoryBlock('', summary.expenseFamilies, summary.unpointedExpense, summary.expenseTotals, 'depense'))
+    } else {
+      card.append(categoryBlock('', summary.incomeFamilies, summary.unpointedIncome, summary.incomeTotals, 'encaissement'))
+    }
+    return card
+  }
+  const values = nature === 'depense' ? summary.expense : summary.income
+  const label = nature === 'depense' ? 'Dépense' : 'Encaissement'
+  card.append(monthTable(label, displayCents(values, true), ''))
+  return card
+}
+
+function operationsPane(account: Account): HTMLElement {
+  if (account.kind === 'courant') return renderOperations(detail?.operations ?? [], account.id)
+  const page = el('div')
+  page.append(movementEditor(account))
+  if (account.kind === 'epargne') page.append(transferEditor(account))
+  return page
+}
+
+function monthTable(label: string, values: readonly (number | null)[], className: string): HTMLElement {
+  const table = el('table', 'grid')
+  table.append(monthHead())
+  table.append(amountRow(label, values, className))
+  return wrap(table)
 }
 
 function accountForm(account: Account | null): HTMLElement {
@@ -561,20 +678,6 @@ function accountForm(account: Account | null): HTMLElement {
   return form
 }
 
-function renderSummary(summary: AccountSummary, account: Account): HTMLElement {
-  if (summary.kind === 'epargne') {
-    const page = el('div')
-    page.append(balanceEditor(account, summary), movementEditor(account), transferEditor(account))
-    return page
-  }
-  if (summary.kind === 'titre') {
-    const page = el('div')
-    page.append(holdingsEditor(account, summary), titreBalance(summary), movementEditor(account))
-    return page
-  }
-  return statementView(summary)
-}
-
 function holdingsEditor(account: Account, summary: HoldingsSummary): HTMLElement {
   const card = el('section', 'card')
   card.append(el('h2', '', 'Titres'))
@@ -659,21 +762,6 @@ function holdingsEditor(account: Account, summary: HoldingsSummary): HTMLElement
   return card
 }
 
-function titreBalance(summary: HoldingsSummary): HTMLElement {
-  const card = el('section', 'card')
-  card.append(el('h2', '', `Soldes ${year}`))
-  card.append(el('p', 'muted', 'Le solde part de la valorisation à sa date, puis des mouvements. Il est reporté les mois suivants, et affiché au centime.'))
-  const table = el('table', 'grid')
-  table.append(monthHead())
-  table.append(
-    amountRow('Solde', displayCents(summary.balances, false), ''),
-    amountRow('Dépense', displayCents(summary.expense, true), ''),
-    amountRow('Encaissement', displayCents(summary.income, true), ''),
-  )
-  card.append(wrap(table))
-  return card
-}
-
 function holdingTotal(label: string, millis: number): HTMLElement {
   const row = el('tr', 'total')
   row.append(el('td', '', label), el('td'), el('td'), millisCell(millis), el('td'), el('td'))
@@ -727,20 +815,6 @@ async function removePosition(position: Position): Promise<void> {
   })
 }
 
-function statementView(summary: StatementSummary): HTMLElement {
-  const card = el('section', 'card')
-  card.append(el('h2', '', 'Synthèse'))
-  if (summary.balanceMissing) card.append(el('p', 'banner', 'Solde d’ouverture manquant. Les soldes ne sont pas calculés.'))
-  else card.append(el('p', '', `Solde d’ouverture : ${formatEuros(summary.openingCents ?? 0)} au ${formatIsoDate(summary.openingDate ?? '')}`))
-  card.append(categoryBlock('Dépenses', summary.expenseFamilies, summary.unpointedExpense, summary.expenseTotals, 'depense'))
-  card.append(categoryBlock('Encaissements', summary.incomeFamilies, summary.unpointedIncome, summary.incomeTotals, 'encaissement'))
-  const table = el('table', 'grid')
-  table.append(monthHead())
-  table.append(amountRow('Solde', summary.balances, 'total'))
-  card.append(wrap(table))
-  return card
-}
-
 function categoryBlock(
   title: string,
   families: StatementSummary['expenseFamilies'],
@@ -749,7 +823,7 @@ function categoryBlock(
   nature: Nature,
 ): HTMLElement {
   const box = el('div')
-  box.append(el('h3', '', title))
+  if (title) box.append(el('h3', '', title))
   const table = el('table', 'grid')
   table.append(monthHead())
   for (const family of families) {
@@ -863,35 +937,6 @@ function operationsForDrill(): OperationView[] {
     }
     return operation.categoryId === current.categoryId
   })
-}
-
-function balanceEditor(account: Account, summary: BalanceSummary): HTMLElement {
-  const card = el('section', 'card')
-  card.append(el('h2', '', `Soldes ${year}`))
-  card.append(el('p', 'muted', 'Le solde de fin de mois part du solde initial, des mouvements et des virements. Les totaux sont arrondis au centime.'))
-  if (account.openingMillis === null || !account.openingDate) {
-    card.append(el('p', 'banner', 'Solde initial manquant. Les soldes ne sont pas calculés.'))
-  }
-  const amount = amountInput(account.openingMillis === null ? '' : formatInputMillis(account.openingMillis))
-  amount.placeholder = '0,000'
-  const date = dateInput(account.openingDate ?? '')
-  const form = el('div', 'form-row')
-  form.append(labeled('Solde initial', amount), labeled('Date', date))
-  card.append(form)
-  card.append(
-    button('Enregistrer', 'primary', () => {
-      void saveOpening(account, amount.value, date.value)
-    }),
-  )
-  const table = el('table', 'grid')
-  table.append(monthHead())
-  table.append(
-    amountRow('Solde', displayCents(summary.balances, false), ''),
-    amountRow('Dépense', displayCents(summary.expense, true), ''),
-    amountRow('Encaissement', displayCents(summary.income, true), ''),
-  )
-  card.append(wrap(table))
-  return card
 }
 
 async function saveOpening(account: Account, amount: string, date: string): Promise<void> {
@@ -1072,9 +1117,14 @@ function transferTargets(exceptId: number): AccountCard[] {
   )
 }
 
-function renderBatches(batches: BatchView[]): HTMLElement {
+function renderBatches(batches: BatchView[], account: Account): HTMLElement {
   const card = el('section', 'card')
-  card.append(el('h2', '', 'Imports'))
+  const head = el('div', 'section-head')
+  head.append(
+    el('h2', '', 'Imports'),
+    button('Importer un relevé', 'primary', () => { void startImport(account.id) }),
+  )
+  card.append(head)
   if (batches.length === 0) card.append(el('p', 'empty', 'Aucun import.'))
   for (const batch of batches) {
     const row = el('div', 'toolbar')
@@ -1608,6 +1658,7 @@ async function move(kind: 'family' | 'category', id: number, direction: -1 | 1):
 
 async function go(next: Screen): Promise<void> {
   screen = next
+  accountTab = 'depense'
   editing = false
   draftBank = null
   preview = null
@@ -1623,6 +1674,7 @@ async function go(next: Screen): Promise<void> {
 async function openAccount(id: number): Promise<void> {
   accountId = id
   screen = 'account'
+  accountTab = 'depense'
   editing = false
   editingOperationId = null
   draftBank = null
@@ -1642,6 +1694,7 @@ async function changeYear(next: number): Promise<void> {
 
 function startNewAccount(bankName: string | null): void {
   accountId = null
+  accountTab = 'depense'
   editing = true
   draftBank = bankName
   detail = null
@@ -1794,7 +1847,7 @@ function plusButton(label: string, onClick: () => void): HTMLButtonElement {
 
 function glyphButton(
   label: string,
-  glyph: 'up' | 'down' | 'check' | 'plus' | 'archive' | 'restore',
+  glyph: 'up' | 'down' | 'check' | 'plus' | 'archive' | 'restore' | 'back',
   onClick: () => void,
   tone = '',
 ): HTMLButtonElement {
@@ -1807,6 +1860,7 @@ function glyphButton(
       '<path d="M2.5 6.2h11M3.6 6.2V13h8.8V6.2M6.2 9.2h3.6M2.5 6.2 4.2 3.2h7.6l1.7 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
     restore:
       '<path d="M3.2 8a4.4 4.4 0 1 0 1.2-3.1M3 3.2v3.3h3.3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+    back: '<path d="M10 3.5 5.5 8 10 12.5M5.5 8H13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
   }
   const item = document.createElement('button')
   item.type = 'button'
