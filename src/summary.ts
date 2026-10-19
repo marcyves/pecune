@@ -154,11 +154,7 @@ export function globalFromAccounts(
   }[],
 ): GlobalSummary {
   const banks = new Map<number, { bankId: number; bankName: string; accounts: GlobalAccountRow[] }>()
-  const ordered = [...rows].sort((a, b) => {
-    const bank = a.bankName.localeCompare(b.bankName, 'fr')
-    if (bank !== 0) return bank
-    return a.accountName.localeCompare(b.accountName, 'fr')
-  })
+  const ordered = [...rows].sort((a, b) => a.bankName.localeCompare(b.bankName, 'fr') || a.bankId - b.bankId)
   for (const row of ordered) {
     let bank = banks.get(row.bankId)
     if (!bank) {

@@ -32,6 +32,7 @@ import {
   listUnpointed,
   moveCategory,
   moveFamily,
+  moveAccount,
   pointOperation,
   previewImport,
   previewOperationTransfer,
@@ -241,6 +242,8 @@ function register(): void {
     copyFileSync(databasePath, choice.filePath)
     return choice.filePath
   })
+  handle('printPage', () => printPage())
+  handle('exportPdf', (defaultName) => exportPdf(String(defaultName ?? 'tableau-global.pdf')))
   handle('workspace', (year) => workspace(Number(year)))
   handle('accountDetail', (id, year) => accountDetail(Number(id), Number(year)))
   handle('saveAccount', (input) => saveAccount(input as SaveAccount))
@@ -267,6 +270,7 @@ function register(): void {
     return createCategory(db, { name: value.name, familyId: value.familyId })
   })
   handle('moveCategory', (id, direction) => moveCategory(requireDatabase(), Number(id), direction as -1 | 1))
+  handle('moveAccount', (id, direction) => moveAccount(requireDatabase(), Number(id), direction as -1 | 1))
   handle('setMonthlyBalance', (accountId, month, raw) => {
     setMonthlyBalance(requireDatabase(), Number(accountId), String(month), centsFromInput(String(raw)))
   })
@@ -359,6 +363,52 @@ function register(): void {
     updateManualOperation(requireDatabase(), Number(operationId), String(date ?? ''), String(label ?? ''), String(amount ?? '')),
   )
   handle('deleteManualOperation', (operationId) => deleteManualOperation(requireDatabase(), Number(operationId)))
+}
+
+function currentWindow(): BrowserWindow {
+  const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows().find((item) => !item.isDestroyed())
+  if (!window) throw new LedgerError('Fenêtre introuvable.')
+  return window
+}
+
+function printPage(): Promise<boolean> {
+  const window = currentWindow()
+  return new Promise((resolve, reject) => {
+    window.webContents.print(
+      {
+        silent: false,
+        printBackground: true,
+        color: true,
+        landscape: true,
+        pageSize: 'A4',
+        margins: { marginType: 'none' },
+      },
+      (success, failureReason) => {
+        if (success || !failureReason || /cancel/i.test(failureReason)) resolve(success)
+        else reject(new LedgerError(failureReason))
+      },
+    )
+  })
+}
+
+async function exportPdf(defaultName: string): Promise<string | null> {
+  const window = currentWindow()
+  const pdf = await window.webContents.printToPDF({
+    printBackground: true,
+    landscape: true,
+    pageSize: 'A4',
+    preferCSSPageSize: true,
+    margins: { top: 0, bottom: 0, left: 0, right: 0 },
+  })
+  const choice = await dialog.showSaveDialog(window, {
+    title: 'Exporter en PDF',
+    defaultPath: defaultName,
+    filters: [{ name: 'PDF', extensions: ['pdf'] }],
+  })
+  if (choice.canceled || !choice.filePath) return null
+  const filePath = choice.filePath.toLowerCase().endsWith('.pdf') ? choice.filePath : `${choice.filePath}.pdf`
+  writeFileSync(filePath, pdf)
+  return filePath
 }
 
 function createWindow(): void {

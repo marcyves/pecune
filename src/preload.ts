@@ -11,6 +11,8 @@ const comptes = {
   createAt: () => call<string | null>('createAt'),
   openAt: () => call<string | null>('openAt'),
   exportCopy: () => call<string | null>('exportCopy'),
+  printPage: () => call<boolean>('printPage'),
+  exportPdf: (defaultName: string) => call<string | null>('exportPdf', defaultName),
   workspace: (year: number) => call<unknown>('workspace', year),
   accountDetail: (id: number, year: number) => call<unknown>('accountDetail', id, year),
   saveAccount: (input: unknown) => call<unknown>('saveAccount', input),
@@ -19,6 +21,7 @@ const comptes = {
   moveFamily: (id: number, direction: -1 | 1) => call<unknown>('moveFamily', id, direction),
   saveCategory: (input: unknown) => call<unknown>('saveCategory', input),
   moveCategory: (id: number, direction: -1 | 1) => call<unknown>('moveCategory', id, direction),
+  moveAccount: (id: number, direction: -1 | 1) => call<unknown>('moveAccount', id, direction),
   setMonthlyBalance: (accountId: number, month: string, raw: string) =>
     call<unknown>('setMonthlyBalance', accountId, month, raw),
   savePosition: (input: unknown) => call<unknown>('savePosition', input),

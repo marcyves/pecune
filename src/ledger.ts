@@ -45,9 +45,10 @@ export function createAccount(
   if (input.kind !== 'courant' && input.kind !== 'epargne' && input.kind !== 'titre') throw new LedgerError('Type de compte inconnu.')
   const opening = openingForKind(input.kind, input.openingCents ?? null, input.openingMillis, input.openingDate ?? null)
   assertAccountName(database, name, bankId)
+  const order = nextOrder(database, 'SELECT COALESCE(MAX(sort_order), 0) AS value FROM accounts WHERE bank_id = ?', [bankId])
   const result = insert(
     database,
-    'INSERT INTO accounts (name, bank_id, kind, mapping_json, opening_cents, opening_millis, opening_date, cash_millis) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO accounts (name, bank_id, kind, mapping_json, opening_cents, opening_millis, opening_date, cash_millis, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
     [
       name,
       bankId,
@@ -57,6 +58,7 @@ export function createAccount(
       opening.millis,
       opening.date,
       input.kind === 'titre' ? 0 : null,
+      order,
     ],
   )
   return getAccount(database, result)
@@ -81,10 +83,14 @@ export function updateAccount(
   const mapping = normalizeMapping(input.mapping)
   const opening = openingForKind(current.kind, input.openingCents, input.openingMillis, input.openingDate)
   assertAccountName(database, name, bankId, id)
+  const order = bankId === current.bankId
+    ? null
+    : nextOrder(database, 'SELECT COALESCE(MAX(sort_order), 0) AS value FROM accounts WHERE bank_id = ?', [bankId])
   run(
     database,
     `UPDATE accounts
-     SET name = ?, bank_id = ?, archived = ?, mapping_json = ?, opening_cents = ?, opening_millis = ?, opening_date = ?
+     SET name = ?, bank_id = ?, archived = ?, mapping_json = ?, opening_cents = ?, opening_millis = ?, opening_date = ?,
+         sort_order = COALESCE(?, sort_order)
      WHERE id = ?`,
     [
       name,
@@ -94,6 +100,7 @@ export function updateAccount(
       opening.cents,
       opening.millis,
       opening.date,
+      order,
       id,
     ],
   )
@@ -102,7 +109,7 @@ export function updateAccount(
 }
 
 export function listAccounts(database: DatabaseSync): Account[] {
-  return all(database, `${accountSelect()} ORDER BY b.name, a.name`).map(mapAccount)
+  return all(database, `${accountSelect()} ORDER BY b.name, a.sort_order, a.id`).map(mapAccount)
 }
 
 export function accountFigures(
@@ -182,6 +189,28 @@ export function updateFamily(
   const name = requiredName(input.name, 'Le nom de la famille est requis.')
   run(database, 'UPDATE families SET name = ?, archived = ? WHERE id = ?', [name, input.archived ? 1 : 0, id])
   return familyById(database, id)
+}
+
+export function moveAccount(database: DatabaseSync, id: number, direction: -1 | 1): void {
+  const account = getAccount(database, id)
+  if (direction !== -1 && direction !== 1) return
+  const rows = all(database, 'SELECT id, archived FROM accounts WHERE bank_id = ? ORDER BY sort_order, id', [
+    account.bankId,
+  ]).map((row) => ({ id: numberValue(row.id), archived: numberValue(row.archived) === 1 }))
+  const visible = rows.filter((row) => !row.archived)
+  const index = visible.findIndex((row) => row.id === id)
+  const target = index + direction
+  if (index < 0 || target < 0 || target >= visible.length) return
+  const reordered = [...visible]
+  const [moved] = reordered.splice(index, 1)
+  reordered.splice(target, 0, moved)
+  let cursor = 0
+  const full = rows.map((row) => (row.archived ? row.id : reordered[cursor++].id))
+  transaction(database, () => {
+    full.forEach((rowId, position) => {
+      run(database, 'UPDATE accounts SET sort_order = ? WHERE id = ?', [position + 1, rowId])
+    })
+  })
 }
 
 export function moveFamily(database: DatabaseSync, id: number, direction: -1 | 1): void {
@@ -624,17 +653,16 @@ export function updateManualOperation(
 export function deleteManualOperation(database: DatabaseSync, operationId: number): void {
   const operation = one(database, 'SELECT id, batch_id FROM operations WHERE id = ?', [operationId])
   if (!operation) throw new LedgerError('Opération introuvable.')
-  if (operation.batch_id !== null) throw new LedgerError('Une ligne importée ne s’efface pas.')
   const transfer = one(
     database,
     'SELECT id FROM transfers WHERE source_operation_id = ? OR dest_operation_id = ?',
     [operationId, operationId],
   )
-  if (transfer) {
-    detachTransfer(database, numberValue(transfer.id), null)
-    return
-  }
-  run(database, 'DELETE FROM operations WHERE id = ?', [operationId])
+  transaction(database, () => {
+    if (transfer) detachTransfer(database, numberValue(transfer.id), null)
+    const still = one(database, 'SELECT id FROM operations WHERE id = ?', [operationId])
+    if (still) run(database, 'DELETE FROM operations WHERE id = ?', [operationId])
+  })
 }
 
 export function deleteTransfer(database: DatabaseSync, transferId: number): void {
@@ -1036,7 +1064,6 @@ function manualOperation(database: DatabaseSync, operationId: number): Row {
     [operationId],
   )
   if (!operation) throw new LedgerError('Opération introuvable.')
-  if (operation.batch_id !== null) throw new LedgerError('Une ligne importée ne se modifie pas.')
   return operation
 }
 

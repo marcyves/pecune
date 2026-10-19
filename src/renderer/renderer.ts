@@ -56,6 +56,8 @@ type ComptesApi = {
   createAt: () => Promise<Result<string | null>>
   openAt: () => Promise<Result<string | null>>
   exportCopy: () => Promise<Result<string | null>>
+  printPage: () => Promise<Result<boolean>>
+  exportPdf: (defaultName: string) => Promise<Result<string | null>>
   workspace: (year: number) => Promise<Result<Workspace>>
   accountDetail: (id: number, year: number) => Promise<Result<Detail>>
   saveAccount: (input: unknown) => Promise<Result<Account>>
@@ -64,6 +66,7 @@ type ComptesApi = {
   moveFamily: (id: number, direction: -1 | 1) => Promise<Result<unknown>>
   saveCategory: (input: unknown) => Promise<Result<unknown>>
   moveCategory: (id: number, direction: -1 | 1) => Promise<Result<unknown>>
+  moveAccount: (id: number, direction: -1 | 1) => Promise<Result<unknown>>
   setMonthlyBalance: (accountId: number, month: string, raw: string) => Promise<Result<unknown>>
   savePosition: (input: {
     accountId: number
@@ -128,7 +131,9 @@ let detail: Detail | null = null
 let unpointed: UnpointedView[] = []
 let pointFilter: number | null = null
 let editingOperationId: number | null = null
+let operationsEdit = false
 let globalView: 'balance' | 'expense' | 'income' = 'balance'
+let globalOrder = false
 let accountTab: 'depense' | 'encaissement' | 'operations' = 'depense'
 let movingCategoryId: number | null = null
 let notice = ''
@@ -180,6 +185,11 @@ document.addEventListener('keydown', (event) => {
   drill = null
   movingCategoryId = null
   render()
+})
+
+window.addEventListener('beforeprint', () => {
+  if (screen === 'global' && workspace) fillPrintRoot(workspace.global)
+  else clearPrintRoot()
 })
 
 async function loadWorkspace(): Promise<void> {
@@ -320,7 +330,21 @@ function main(): HTMLElement {
 
 function renderGlobal(global: GlobalSummary): HTMLElement {
   const page = el('div')
-  page.append(el('h1', '', `Tableau global ${year}`))
+  const head = el('div', 'global-head')
+  const edit = glyphButton('Changer l’ordre', 'edit', () => {
+    globalOrder = !globalOrder
+    render()
+  })
+  if (globalOrder) edit.classList.add('active')
+  edit.setAttribute('aria-pressed', String(globalOrder))
+  const tools = el('div', 'global-tools')
+  tools.append(
+    edit,
+    glyphButton('Imprimer', 'print', () => { void outputGlobal('print') }),
+    glyphButton('Exporter en PDF', 'pdf', () => { void outputGlobal('pdf') }),
+  )
+  head.append(el('h1', '', `Tableau global ${year}`), tools)
+  page.append(head)
   const tabs = el('div', 'tabs')
   for (const [field, label] of [
     ['balance', 'Soldes'],
@@ -338,28 +362,166 @@ function renderGlobal(global: GlobalSummary): HTMLElement {
   return page
 }
 
-function moneyBlock(global: GlobalSummary, field: 'expense' | 'income' | 'balance'): HTMLElement {
+function moneyBlock(global: GlobalSummary, field: 'expense' | 'income' | 'balance', interactive = true): HTMLElement {
   const card = el('section', 'card')
   if (global.banks.length === 0) {
     card.append(el('p', 'empty', 'Aucun compte.'))
     return card
   }
   const table = el('table', 'grid')
-  table.append(monthHead())
-  for (const bank of global.banks) {
-    table.append(labelRow(bank.bankName, 'group'))
-    for (const account of bank.accounts) {
-      const row = labelRow('', 'account')
-      const name = button(account.accountName, 'link', () => openAccount(account.accountId))
-      row.querySelector('td')?.append(name)
-      addAmounts(row, account[field])
-      table.append(row)
-    }
-    table.append(amountRow(`Total ${bank.bankName}`, bank[field], 'total'))
+  const head = document.createElement('thead')
+  head.append(monthHead())
+  table.append(head)
+  if (interactive) {
+    const body = document.createElement('tbody')
+    table.append(body)
+    global.banks.forEach((bank, index) => {
+      body.append(bankHeading(bank.bankName))
+      for (const account of bank.accounts) body.append(accountRow(account, field, true))
+      body.append(amountRow(`Total ${bank.bankName}`, bank[field], 'total'))
+      if (index < global.banks.length - 1) body.append(bankGap())
+    })
+    body.append(amountRow('Total', global[field], 'total'))
+  } else {
+    const grand = amountRow('Total', global[field], 'total')
+    global.banks.forEach((bank, index) => {
+      const last = index === global.banks.length - 1
+      for (const group of printBankGroups(bank, field, last, last ? grand : null)) table.append(group)
+    })
   }
-  table.append(amountRow('Total', global[field], 'total'))
   card.append(wrap(table))
   return card
+}
+
+function accountRow(
+  account: GlobalSummary['banks'][number]['accounts'][number],
+  field: 'expense' | 'income' | 'balance',
+  interactive: boolean,
+): HTMLElement {
+  const row = labelRow('', 'account')
+  const cell = row.querySelector('td')
+  cell?.classList.add('account-name')
+  if (interactive && globalOrder) {
+    const arrows = el('span', 'order-arrows')
+    arrows.append(
+      glyphButton('Haut', 'up', () => { void reorderAccount(account.accountId, -1) }),
+      glyphButton('Bas', 'down', () => { void reorderAccount(account.accountId, 1) }),
+    )
+    cell?.append(arrows)
+  }
+  cell?.append(
+    interactive
+      ? button(account.accountName, 'link', () => openAccount(account.accountId))
+      : el('span', '', account.accountName),
+  )
+  addAmounts(row, account[field])
+  return row
+}
+
+function keepRows(rows: HTMLElement[]): HTMLTableSectionElement {
+  const body = document.createElement('tbody')
+  body.className = 'keep'
+  body.append(...rows)
+  return body
+}
+
+function printBankGroups(
+  bank: GlobalSummary['banks'][number],
+  field: 'expense' | 'income' | 'balance',
+  last: boolean,
+  grandTotal: HTMLElement | null,
+): HTMLTableSectionElement[] {
+  const opening = bank.accounts.slice(0, Math.min(2, bank.accounts.length))
+  const rest = bank.accounts.slice(opening.length)
+  const middle = rest.slice(0, -1)
+  const closingAccount = rest.at(-1) ?? null
+  const groups: HTMLTableSectionElement[] = []
+  const start = [bankHeading(bank.bankName), ...opening.map((account) => accountRow(account, field, false))]
+  if (!closingAccount) {
+    start.push(amountRow(`Total ${bank.bankName}`, bank[field], 'total'))
+    if (!last) start.push(bankGap())
+    if (grandTotal) start.push(grandTotal)
+    groups.push(keepRows(start))
+    return groups
+  }
+  groups.push(keepRows(start))
+  if (middle.length > 0) {
+    const body = document.createElement('tbody')
+    body.append(...middle.map((account) => accountRow(account, field, false)))
+    groups.push(body)
+  }
+  const end = [
+    accountRow(closingAccount, field, false),
+    amountRow(`Total ${bank.bankName}`, bank[field], 'total'),
+  ]
+  if (!last) end.push(bankGap())
+  if (grandTotal) end.push(grandTotal)
+  groups.push(keepRows(end))
+  return groups
+}
+
+const GLOBAL_PAGES = [
+  ['balance', 'Soldes'],
+  ['expense', 'Dépenses'],
+  ['income', 'Encaissements'],
+] as const
+
+function fillPrintRoot(global: GlobalSummary): void {
+  clearPrintRoot()
+  const style = document.createElement('style')
+  style.id = 'print-page-style'
+  style.textContent = '@page { size: A4 landscape; margin: 10mm 8mm; }'
+  document.head.append(style)
+  const root = document.createElement('div')
+  root.id = 'print-root'
+  root.className = 'print-root'
+  for (const [field, label] of GLOBAL_PAGES) {
+    const sheet = el('section', 'print-page')
+    sheet.append(el('h1', '', `Tableau global ${year}`), el('p', 'print-view', label), moneyBlock(global, field, false))
+    root.append(sheet)
+  }
+  document.body.append(root)
+  fitPrintWidth(root)
+}
+
+function fitPrintWidth(root: HTMLElement): void {
+  root.classList.add('print-measure')
+  const available = root.clientWidth
+  if (available > 0) {
+    for (const table of root.querySelectorAll('table')) {
+      table.style.setProperty('width', 'max-content', 'important')
+      table.style.setProperty('max-width', 'none', 'important')
+      table.style.setProperty('table-layout', 'auto', 'important')
+      const needed = table.scrollWidth
+      table.style.removeProperty('width')
+      table.style.removeProperty('max-width')
+      table.style.removeProperty('table-layout')
+      table.style.zoom = needed > available ? String((available / needed) * 0.99) : ''
+    }
+  }
+  root.classList.remove('print-measure')
+}
+
+function clearPrintRoot(): void {
+  document.getElementById('print-root')?.remove()
+  document.getElementById('print-page-style')?.remove()
+}
+
+async function outputGlobal(kind: 'print' | 'pdf'): Promise<void> {
+  if (!workspace) return
+  fillPrintRoot(workspace.global)
+  await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)))
+  const previous = notice
+  try {
+    if (kind === 'print') await ask(window.comptes.printPage())
+    else {
+      const filePath = await ask(window.comptes.exportPdf(`Tableau global ${year}.pdf`))
+      if (filePath) notice = 'PDF enregistré.'
+    }
+  } finally {
+    clearPrintRoot()
+  }
+  if (notice !== previous) render()
 }
 
 function renderAccounts(): HTMLElement {
@@ -1160,18 +1322,27 @@ function renderBatches(batches: BatchView[], account: Account): HTMLElement {
 
 function renderOperations(operations: OperationView[], accountId: number): HTMLElement {
   const card = el('section', 'card')
-  card.append(el('h2', '', `Opérations ${year}`))
+  const head = el('div', 'section-head')
+  const edit = glyphButton('Modifier les opérations', 'edit', () => {
+    operationsEdit = !operationsEdit
+    if (!operationsEdit) editingOperationId = null
+    render()
+  })
+  if (operationsEdit) edit.classList.add('active')
+  edit.setAttribute('aria-pressed', String(operationsEdit))
+  head.append(el('h2', '', `Opérations ${year}`), edit)
+  card.append(head)
   if (operations.length === 0) card.append(el('p', 'empty', 'Aucune opération sur cette année.'))
   else {
     const table = el('table', 'grid')
-    const head = el('tr')
+    const headRow = el('tr')
     for (const label of ['Date', 'Libellé', 'Montant', 'Catégorie', '']) {
-      head.append(el('th', label === 'Catégorie' ? 'point' : '', label))
+      headRow.append(el('th', label === 'Catégorie' ? 'point' : '', label))
     }
-    table.append(head)
+    table.append(headRow)
     for (const operation of operations) {
       const row = el('tr')
-      if (editingOperationId === operation.id && !operation.imported) {
+      if (operationsEdit && editingOperationId === operation.id) {
         const date = dateInput(operation.date)
         const label = textInput(operation.label)
         const amount = amountInput(formatInputAmount(operation.amountCents))
@@ -1473,11 +1644,11 @@ function operationActions(
       void clearPoint(operation.id)
     }))
   }
-  if (!operation.imported) {
+  if (operationsEdit) {
     actions.append(
       button('Modifier', 'small', () => {
         editingOperationId = operation.id
-        void loadDetail()
+        render()
       }),
       button('Effacer', 'small danger', () => {
         void eraseManual(operation)
@@ -1505,6 +1676,7 @@ async function clearPoint(operationId: number): Promise<void> {
   }
   await loadDetail()
   await loadWorkspace()
+  render()
 }
 
 async function saveManual(operationId: number, date: string, label: string, amount: string): Promise<void> {
@@ -1516,10 +1688,11 @@ async function saveManual(operationId: number, date: string, label: string, amou
   editingOperationId = null
   await loadDetail()
   await loadWorkspace()
+  render()
 }
 
 async function eraseManual(operation: OperationView): Promise<void> {
-  if (!window.confirm(`Effacer « ${operation.label} » ? Cette ligne ne vient pas d’un import.`)) return
+  if (!window.confirm(`Effacer « ${operation.label} » ?`)) return
   const saved = await ask(window.comptes.deleteManualOperation(operation.id))
   if (saved === null) {
     render()
@@ -1528,6 +1701,7 @@ async function eraseManual(operation: OperationView): Promise<void> {
   editingOperationId = null
   await loadDetail()
   await loadWorkspace()
+  render()
 }
 
 function pointCell(
@@ -1677,6 +1851,16 @@ async function eraseAccount(account: Account): Promise<void> {
   render()
 }
 
+async function reorderAccount(id: number, direction: -1 | 1): Promise<void> {
+  const done = await ask(window.comptes.moveAccount(id, direction))
+  if (done === null) {
+    render()
+    return
+  }
+  await loadWorkspace()
+  render()
+}
+
 async function move(kind: 'family' | 'category', id: number, direction: -1 | 1): Promise<void> {
   const done =
     kind === 'family'
@@ -1694,6 +1878,7 @@ async function go(next: Screen): Promise<void> {
   screen = next
   accountTab = 'depense'
   movingCategoryId = null
+  operationsEdit = false
   editing = false
   draftBank = null
   preview = null
@@ -1710,6 +1895,7 @@ async function openAccount(id: number): Promise<void> {
   accountId = id
   screen = 'account'
   accountTab = 'depense'
+  operationsEdit = false
   editing = false
   editingOperationId = null
   draftBank = null
@@ -1749,6 +1935,20 @@ function monthHead(withTotal = false): HTMLElement {
   row.append(el('th', '', ''))
   if (withTotal) row.append(el('th', 'num year-total', 'Total'))
   for (const label of SHORT) row.append(el('th', 'num', label))
+  return row
+}
+
+function bankHeading(name: string): HTMLElement {
+  const row = el('tr', 'group')
+  row.append(el('td', '', name))
+  for (let index = 0; index < SHORT.length; index += 1) row.append(el('td'))
+  return row
+}
+
+function bankGap(): HTMLElement {
+  const row = el('tr', 'bank-gap')
+  row.append(el('td'))
+  for (let index = 0; index < SHORT.length; index += 1) row.append(el('td'))
   return row
 }
 
@@ -1902,7 +2102,7 @@ function plusButton(label: string, onClick: () => void): HTMLButtonElement {
 
 function glyphButton(
   label: string,
-  glyph: 'up' | 'down' | 'check' | 'plus' | 'archive' | 'restore' | 'back' | 'move',
+  glyph: 'up' | 'down' | 'check' | 'plus' | 'archive' | 'restore' | 'back' | 'move' | 'edit' | 'print' | 'pdf',
   onClick: () => void,
   tone = '',
 ): HTMLButtonElement {
@@ -1917,6 +2117,10 @@ function glyphButton(
       '<path d="M3.2 8a4.4 4.4 0 1 0 1.2-3.1M3 3.2v3.3h3.3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
     back: '<path d="M10 3.5 5.5 8 10 12.5M5.5 8H13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
     move: '<path d="M2 8h6.2M6 5.2 8.8 8 6 10.8M10.2 3.2H13v9.6h-2.8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+    edit: '<path d="M9.2 2.6 13.4 6.8 6.2 14H2.2v-4.1Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+    print:
+      '<path d="M4.2 6.2V2.6h7.6v3.6M2.8 6.2h10.4v5H2.8zM5 9.4h6v4H5z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
+    pdf: '<path d="M4 2.2h5.2L12.8 6V14H4zM9 2.6V6h3.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
   }
   const item = document.createElement('button')
   item.type = 'button'

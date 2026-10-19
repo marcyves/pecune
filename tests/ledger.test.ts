@@ -27,6 +27,7 @@ import {
   listFamilies,
   listOperations,
   listUnpointed,
+  moveAccount,
   operationCount,
   pointOperation,
   previewImport,
@@ -116,7 +117,7 @@ describe('base', () => {
     const database = openDatabase(path)
     databases.push(database)
     const version = database.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as { value: string }
-    expect(version.value).toBe('10')
+    expect(version.value).toBe('11')
     const legacy = listAccounts(database).find((account) => account.bankName === 'Banque Postale')
     expect(legacy?.kind).toBe('epargne')
     expect(legacy?.cashMillis).toBeNull()
@@ -457,6 +458,23 @@ describe('règles du classeur', () => {
     })
     expect(categoryTotals(database, 2026).get(courses.id)).toBe(-250)
     expect(categoryTotals(database, 2025).has(courses.id)).toBe(false)
+  })
+
+  it('range les comptes d’une banque dans l’ordre choisi', () => {
+    const { database } = tempDatabase()
+    createAccount(database, { name: 'Alpha', bankName: 'Banque Postale', kind: 'epargne' })
+    const zebra = createAccount(database, { name: 'Zèbre', bankName: 'Banque Postale', kind: 'epargne' })
+    createAccount(database, { name: 'CCP', bankName: 'BPER', kind: 'epargne' })
+    moveAccount(database, zebra.id, -1)
+    const names = (bank: string) =>
+      listAccounts(database)
+        .filter((account) => account.bankName === bank)
+        .map((account) => account.name)
+    expect(names('Banque Postale')).toEqual(['Zèbre', 'Alpha'])
+    expect(names('BPER')).toEqual(['CCP'])
+    expect(globalSummary(database, 2026).banks[0].accounts.map((account) => account.accountName)).toEqual(['Zèbre', 'Alpha'])
+    moveAccount(database, zebra.id, -1)
+    expect(names('Banque Postale')).toEqual(['Zèbre', 'Alpha'])
   })
 
   it('déplace une catégorie vers une autre famille de la même nature', () => {
@@ -974,7 +992,7 @@ describe('règles du classeur', () => {
     unpointOperation(database, outgoing.id)
     expect(listOperations(database, joint.id, 2026)).toHaveLength(2)
     expect(listOperations(database, joint.id, 2026).find((row) => row.id === received!.id)?.categoryId).toBeNull()
-    expect(() => deleteManualOperation(database, received!.id)).toThrow(/importée/)
+    expect(listOperations(database, joint.id, 2026).some((row) => row.id === received!.id)).toBe(true)
 
     pointOperation(database, outgoing.id, outgoingCategory(database), joint.id, null)
     const doubled = listOperations(database, joint.id, 2026)
@@ -994,6 +1012,25 @@ describe('règles du classeur', () => {
     createSavingsTransfer(database, livret.id, joint.id, '2026-03-10', '40,00', received!.id)
     expect(listOperations(database, joint.id, 2026)).toHaveLength(2)
     expect(listOperations(database, joint.id, 2026).find((row) => row.id === received!.id)?.categoryName).toBe('Virement reçu')
+  })
+
+  it('corrige ou efface une ligne importée', async () => {
+    const { database, dir } = tempDatabase()
+    const account = createAccount(database, {
+      name: 'CCP',
+      bankName: 'Banque Postale',
+      kind: 'courant',
+      mapping: signed,
+      openingCents: 0,
+      openingDate: '2026-01-01',
+    })
+    await confirmImport(database, account.id, csv(dir, 'ccp.csv', 'Date;Libelle;Montant\n15/05/2026;VIREMENT INSTANTANE CREDIT;195,00\n'))
+    const imported = listOperations(database, account.id, 2026)[0]
+    expect(imported.imported).toBe(true)
+    updateManualOperation(database, imported.id, '2026-05-15', 'Virement corrigé', '195,00')
+    expect(listOperations(database, account.id, 2026)[0].label).toBe('Virement corrigé')
+    deleteManualOperation(database, imported.id)
+    expect(listOperations(database, account.id, 2026)).toEqual([])
   })
 })
 

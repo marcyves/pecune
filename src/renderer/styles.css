@@ -73,6 +73,163 @@ h1, h2, h3 {
 
 h1 { font-size: 1.8rem; }
 
+.global-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.85rem;
+}
+
+.global-head h1 { margin: 0; }
+
+.global-tools {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+@media screen {
+  .print-root { display: none !important; }
+
+  .print-root.print-measure {
+    display: block !important;
+    position: absolute !important;
+    left: -200vw !important;
+    top: 0 !important;
+    width: 281mm !important;
+    visibility: hidden !important;
+    pointer-events: none !important;
+  }
+}
+
+.print-root {
+  color: #1d1a16;
+  width: 100%;
+  max-width: 100%;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+
+.print-page {
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.print-page h1 {
+  font-size: 16pt;
+  margin: 0 0 1mm;
+}
+
+.print-view {
+  margin: 0 0 4mm;
+  font-size: 11pt;
+  font-weight: 650;
+  color: #1f4a38;
+}
+
+.print-root .card {
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  margin: 0;
+  background: white;
+  width: 100%;
+  max-width: 100%;
+}
+
+.print-root .table-wrap {
+  overflow: hidden;
+  width: 100%;
+  max-width: 100%;
+}
+
+.print-root table.grid {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  table-layout: fixed !important;
+  font-size: 8pt;
+}
+
+.print-root table.grid th,
+.print-root table.grid td {
+  min-width: 0 !important;
+  padding: 1mm 0.7mm !important;
+  overflow: hidden;
+}
+
+.print-root table.grid th:first-child,
+.print-root table.grid td:first-child {
+  position: static !important;
+  left: auto !important;
+  width: 16% !important;
+  max-width: 16% !important;
+  white-space: normal !important;
+  background: white;
+}
+
+.print-root table.grid th:not(:first-child),
+.print-root table.grid td:not(:first-child) {
+  width: 7% !important;
+  white-space: nowrap !important;
+}
+
+.print-root table.grid td.account-name { display: table-cell; }
+
+.print-root table.grid tr.group td,
+.print-root table.grid tr.group td:first-child {
+  background: #d5e4da;
+  font-size: 10pt;
+}
+
+.print-root table.grid tr.bank-gap td,
+.print-root table.grid tr.bank-gap td:first-child {
+  height: 3mm;
+  background: white;
+}
+
+.print-root table.grid tr { break-inside: avoid; page-break-inside: avoid; }
+
+.print-root table.grid tbody.keep {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+@media print {
+  html, body {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    overflow-x: hidden !important;
+  }
+
+  .print-root { display: block !important; }
+
+  body:has(.print-root:not(:empty)) .app { display: none !important; }
+
+  .print-page { break-after: page; page-break-after: always; }
+  .print-page:last-child { break-after: auto; page-break-after: auto; }
+}
+
+.order-arrows {
+  display: inline-flex;
+  gap: 0.15rem;
+  flex: 0 0 auto;
+}
+
+.order-arrows button.icon {
+  width: 1.45rem;
+  height: 1.45rem;
+}
+
+table.grid td.account-name {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
 .account-title {
   display: flex;
   align-items: center;
@@ -323,12 +480,27 @@ table.grid td.year-total { border-right: 1px solid #d9cebf; }
 .family td { font-weight: 650; background: #f7f1e7; }
 .family td:first-child { background: #f7f1e7; }
 .total td { font-weight: 700; border-top: 2px solid #d9cebf; }
-.group td {
+table.grid tr.group td {
   font-family: Iowan Old Style, Palatino, Georgia, serif;
-  background: #efe6d6;
-  font-size: 1.02rem;
+  background: #d5e4da;
+  color: #1c2822;
+  font-size: 1.15rem;
+  font-weight: 700;
+  padding-top: 0.5rem;
+  padding-bottom: 0.5rem;
 }
-.group td:first-child { background: #efe6d6; }
+
+table.grid tr.group td:first-child {
+  background: #d5e4da;
+}
+
+table.grid tr.bank-gap td,
+table.grid tr.bank-gap td:first-child {
+  height: 0.9rem;
+  padding: 0;
+  border: 0;
+  background: #fffdf8;
+}
 .unpointed td { font-style: italic; }
 .indent { padding-left: 1.2rem; }
 
