@@ -238,6 +238,8 @@ label.inline-label {
   font-variant-numeric: tabular-nums;
 }
 
+.family-line .category-total { font-weight: 650; }
+
 button.icon.active {
   background: #1f4a38;
   color: #f6f1e7;

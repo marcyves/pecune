@@ -1342,7 +1342,7 @@ function familyCard(family: Family): HTMLElement {
   const card = el('section', 'card family-card')
   const name = textInput(family.name)
   const line = el('div', 'family-line')
-  line.append(inlineLabel('Famille :', name))
+  line.append(inlineLabel('Famille :', name), totalAmount(familyTotal(family)))
   line.append(glyphButton('Haut', 'up', () => move('family', family.id, -1)))
   line.append(glyphButton('Bas', 'down', () => move('family', family.id, 1)))
   line.append(
@@ -1378,9 +1378,7 @@ function familyCard(family: Family): HTMLElement {
     })
     if (moving) moveButton.classList.add('active')
     moveButton.setAttribute('aria-expanded', String(moving))
-    const total = categoryTotal(category.id)
-    const amount = el('span', `category-total${total < 0 ? ' neg' : total === 0 ? ' muted' : ''}`, formatEuros(total))
-    amount.title = `Total ${year}`
+    const amount = totalAmount(categoryTotal(category.id))
     const row = el('div', 'category-line')
     row.append(categoryName, amount, moveButton)
     row.append(glyphButton('Haut', 'up', () => move('category', category.id, -1)))
@@ -1430,6 +1428,16 @@ function familyCard(family: Family): HTMLElement {
 
 function categoryTotal(categoryId: number): number {
   return workspace?.categoryTotals.find((item) => item.categoryId === categoryId)?.totalCents ?? 0
+}
+
+function familyTotal(family: Family): number {
+  return family.categories.reduce((sum, category) => sum + categoryTotal(category.id), 0)
+}
+
+function totalAmount(cents: number): HTMLElement {
+  const amount = el('span', `category-total${cents < 0 ? ' neg' : cents === 0 ? ' muted' : ''}`, formatEuros(cents))
+  amount.title = `Total ${year}`
+  return amount
 }
 
 async function saveCategoryLine(category: Category, name: string, familyId: number, archived = category.archived): Promise<void> {
