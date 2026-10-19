@@ -411,6 +411,12 @@ async function exportPdf(defaultName: string): Promise<string | null> {
   return filePath
 }
 
+function applyIcon(): void {
+  if (process.platform !== 'darwin' || app.dock === undefined) return
+  const iconPath = path.join(here, '..', 'build', 'icon.png')
+  if (existsSync(iconPath)) app.dock.setIcon(iconPath)
+}
+
 function createWindow(): void {
   const window = new BrowserWindow({
     width: 1280,
@@ -430,6 +436,7 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  applyIcon()
   restore()
   register()
   createWindow()

@@ -386,7 +386,10 @@ label.inline-label {
   font-size: 1rem;
 }
 
-.category-line input[type='text'] { flex: 1 1 8rem; }
+.category-line input[type='text'],
+.category-name { flex: 1 1 8rem; }
+
+.family-line .category-name { font-weight: 650; }
 
 .category-total {
   flex: 0 0 auto;
@@ -524,8 +527,21 @@ table.grid tr.bank-gap td:first-child {
 
 .pointing table.grid {
   width: 100%;
-  min-width: 52rem;
+  min-width: 0;
   table-layout: fixed;
+}
+
+.pointing table.grid th:first-child,
+.pointing table.grid td:first-child {
+  min-width: 0;
+  width: 6.2rem;
+}
+
+.pointing th.account,
+.pointing td.account {
+  width: 18%;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .pointing table.grid thead th {
@@ -552,9 +568,9 @@ td.actions button + button {
 
 th.point,
 td.point {
-  width: 24rem;
-  min-width: 18rem;
-  overflow: visible;
+  width: 26%;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .point-row {
@@ -566,9 +582,10 @@ td.point {
 }
 
 .point-row select.transfer-target {
-  flex: 1 1 10rem;
+  flex: 1 1 8rem;
   width: auto;
-  min-width: 10rem;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .point-row select {

@@ -136,6 +136,7 @@ let globalView: 'balance' | 'expense' | 'income' = 'balance'
 let globalOrder = false
 let accountTab: 'depense' | 'encaissement' | 'operations' = 'depense'
 let movingCategoryId: number | null = null
+let categoriesEdit = false
 let notice = ''
 let importFile: string | null = null
 let importSheet = ''
@@ -1230,8 +1231,7 @@ function transferEditor(account: Account): HTMLElement {
   const amount = amountInput('')
   amount.placeholder = '0,00'
   const target = el('select') as HTMLSelectElement
-  target.append(option('', 'Choisir'))
-  for (const item of targets) target.append(option(String(item.id), `${item.name} · ${item.bankName}`))
+  appendAccountGroups(target, targets, 'Choisir')
   const form = el('div', 'form-row')
   form.append(labeled('Date', date), labeled('Montant', amount), labeled('Vers le compte', target))
   card.append(form)
@@ -1247,7 +1247,7 @@ function transferEditor(account: Account): HTMLElement {
         render()
         return
       }
-      const matched = await chooseTransferMatch(target.selectedOptions[0]?.textContent ?? 'Ce compte', matches)
+      const matched = await chooseTransferMatch(accountChoiceLabel(target.value), matches)
       const saved = await ask(
         window.comptes.createTransfer(account.id, Number(target.value), date.value, amount.value, matched),
       )
@@ -1300,6 +1300,27 @@ function transferTargets(exceptId: number): AccountCard[] {
   return (workspace?.accounts ?? []).filter(
     (item) => !item.archived && item.id !== exceptId,
   )
+}
+
+function appendAccountGroups(select: HTMLSelectElement, accounts: AccountCard[], placeholder: string): void {
+  select.append(option('', placeholder))
+  const groups = new Map<string, AccountCard[]>()
+  for (const account of accounts) {
+    const items = groups.get(account.bankName) ?? []
+    items.push(account)
+    groups.set(account.bankName, items)
+  }
+  for (const [bankName, items] of groups) {
+    const group = document.createElement('optgroup')
+    group.label = bankName
+    for (const item of items) group.append(option(String(item.id), item.name))
+    select.append(group)
+  }
+}
+
+function accountChoiceLabel(id: string): string {
+  const account = (workspace?.accounts ?? []).find((item) => String(item.id) === id)
+  return account ? `${account.name} · ${account.bankName}` : 'Ce compte'
 }
 
 function renderBatches(batches: BatchView[], account: Account): HTMLElement {
@@ -1466,14 +1487,17 @@ function renderPointing(): HTMLElement {
   const table = el('table', 'grid')
   const head = el('tr')
   for (const label of ['Date', 'Compte', 'Libellé', 'Montant', 'Catégorie']) {
-    head.append(el('th', label === 'Libellé' ? 'label' : label === 'Catégorie' ? 'point' : '', label))
+    const className = label === 'Libellé' ? 'label' : label === 'Catégorie' ? 'point' : label === 'Compte' ? 'account' : ''
+    head.append(el('th', className, label))
   }
   table.append(head)
   for (const row of unpointed) {
     const line = el('tr')
     const labelCell = el('td', 'label')
     labelCell.append(el('div', 'label-text', row.label))
-    line.append(el('td', '', formatIsoDate(row.date)), el('td', '', `${row.accountName} · ${row.bankName}`), labelCell, moneyCell(row.amountCents))
+    const accountCell = el('td', 'account')
+    accountCell.append(el('div', '', row.accountName), el('div', 'muted', row.bankName))
+    line.append(el('td', '', formatIsoDate(row.date)), accountCell, labelCell, moneyCell(row.amountCents))
     line.append(pointCell(row.amountCents, row.suggestedCategoryId, null, row.id, row.accountId, null, async () => {
       await loadUnpointed()
       if (screen === 'account') await loadDetail()
@@ -1486,7 +1510,22 @@ function renderPointing(): HTMLElement {
 
 function renderCategories(): HTMLElement {
   const page = el('div')
-  page.append(el('h1', '', 'Catégories'))
+  const head = el('div', 'global-head')
+  const edit = glyphButton('Modifier les catégories', 'edit', () => {
+    categoriesEdit = !categoriesEdit
+    if (!categoriesEdit) movingCategoryId = null
+    render()
+  })
+  if (categoriesEdit) edit.classList.add('active')
+  edit.setAttribute('aria-pressed', String(categoriesEdit))
+  head.append(el('h1', '', 'Catégories'), edit)
+  page.append(head)
+  if (!categoriesEdit) {
+    const columns = el('div', 'category-columns')
+    columns.append(familyColumn('Dépenses', 'depense'), familyColumn('Encaissements', 'encaissement'))
+    page.append(columns)
+    return page
+  }
   const creator = el('form', 'card')
   const name = field('Nouvelle famille', 'text', '')
   const nature = el('select') as HTMLSelectElement
@@ -1525,58 +1564,66 @@ function familyCard(family: Family): HTMLElement {
   const card = el('section', 'card family-card')
   const name = textInput(family.name)
   const line = el('div', 'family-line')
-  line.append(inlineLabel('Famille :', name), totalAmount(familyTotal(family)))
-  line.append(glyphButton('Haut', 'up', () => move('family', family.id, -1)))
-  line.append(glyphButton('Bas', 'down', () => move('family', family.id, 1)))
-  line.append(
-    glyphButton('Enregistrer', 'check', async () => {
-      await ask(window.comptes.saveFamily({ id: family.id, name: name.value, archived: family.archived }))
-      await loadWorkspace()
-      render()
-    }, 'primary'),
-  )
-  line.append(
-    glyphButton(family.archived ? 'Réactiver' : 'Archiver', family.archived ? 'restore' : 'archive', async () => {
-      if (!family.archived && !window.confirm(`Archiver la famille ${family.name} ?`)) return
-      await ask(window.comptes.saveFamily({ id: family.id, name: name.value, archived: !family.archived }))
-      await loadWorkspace()
-      render()
-    }, family.archived ? '' : 'danger'),
-  )
+  if (categoriesEdit) {
+    line.append(inlineLabel('Famille :', name), totalAmount(familyTotal(family)))
+    line.append(glyphButton('Haut', 'up', () => move('family', family.id, -1)))
+    line.append(glyphButton('Bas', 'down', () => move('family', family.id, 1)))
+    line.append(
+      glyphButton('Enregistrer', 'check', async () => {
+        await ask(window.comptes.saveFamily({ id: family.id, name: name.value, archived: family.archived }))
+        await loadWorkspace()
+        render()
+      }, 'primary'),
+    )
+    line.append(
+      glyphButton(family.archived ? 'Réactiver' : 'Archiver', family.archived ? 'restore' : 'archive', async () => {
+        if (!family.archived && !window.confirm(`Archiver la famille ${family.name} ?`)) return
+        await ask(window.comptes.saveFamily({ id: family.id, name: name.value, archived: !family.archived }))
+        await loadWorkspace()
+        render()
+      }, family.archived ? '' : 'danger'),
+    )
+  } else {
+    line.append(el('span', 'category-name', family.name), totalAmount(familyTotal(family)))
+  }
   card.append(line)
   const list = el('ul', 'category-list')
   for (const category of family.categories) {
     const categoryName = textInput(category.name)
     categoryName.setAttribute('aria-label', 'Nom de la catégorie')
     const targets = (workspace?.families ?? []).filter((item) => item.nature === family.nature && item.id !== family.id)
-    const moving = movingCategoryId === category.id
-    const moveButton = glyphButton('Déplacer', 'move', () => {
-      if (targets.length === 0) {
-        notice = 'Aucune autre famille de cette nature.'
-        render()
-        return
-      }
-      movingCategoryId = moving ? null : category.id
-      render()
-    })
-    if (moving) moveButton.classList.add('active')
-    moveButton.setAttribute('aria-expanded', String(moving))
+    const moving = categoriesEdit && movingCategoryId === category.id
     const amount = totalAmount(categoryTotal(category.id))
     const row = el('div', 'category-line')
-    row.append(categoryName, amount, moveButton)
-    row.append(glyphButton('Haut', 'up', () => move('category', category.id, -1)))
-    row.append(glyphButton('Bas', 'down', () => move('category', category.id, 1)))
-    row.append(
-      glyphButton('Enregistrer', 'check', async () => {
-        await saveCategoryLine(category, categoryName.value, family.id)
-      }, 'primary'),
-    )
-    row.append(
-      glyphButton(category.archived ? 'Réactiver' : 'Archiver', category.archived ? 'restore' : 'archive', async () => {
-        if (!category.archived && !window.confirm(`Archiver la catégorie ${category.name} ?`)) return
-        await saveCategoryLine(category, categoryName.value, family.id, !category.archived)
-      }, category.archived ? '' : 'danger'),
-    )
+    if (!categoriesEdit) {
+      row.append(el('span', 'category-name', category.name), amount)
+    } else {
+      const moveButton = glyphButton('Déplacer', 'move', () => {
+        if (targets.length === 0) {
+          notice = 'Aucune autre famille de cette nature.'
+          render()
+          return
+        }
+        movingCategoryId = moving ? null : category.id
+        render()
+      })
+      if (moving) moveButton.classList.add('active')
+      moveButton.setAttribute('aria-expanded', String(moving))
+      row.append(categoryName, amount, moveButton)
+      row.append(glyphButton('Haut', 'up', () => move('category', category.id, -1)))
+      row.append(glyphButton('Bas', 'down', () => move('category', category.id, 1)))
+      row.append(
+        glyphButton('Enregistrer', 'check', async () => {
+          await saveCategoryLine(category, categoryName.value, family.id)
+        }, 'primary'),
+      )
+      row.append(
+        glyphButton(category.archived ? 'Réactiver' : 'Archiver', category.archived ? 'restore' : 'archive', async () => {
+          if (!category.archived && !window.confirm(`Archiver la catégorie ${category.name} ?`)) return
+          await saveCategoryLine(category, categoryName.value, family.id, !category.archived)
+        }, category.archived ? '' : 'danger'),
+      )
+    }
     const item = el('li', '', row)
     if (moving) {
       const choices = el('div', 'move-choices')
@@ -1589,6 +1636,7 @@ function familyCard(family: Family): HTMLElement {
     list.append(item)
   }
   card.append(list)
+  if (!categoriesEdit) return card
   const add = textInput('')
   add.placeholder = 'Nouvelle catégorie'
   add.setAttribute('aria-label', 'Nouvelle catégorie')
@@ -1728,8 +1776,7 @@ function pointCell(
   const choice = categorySelect(amountCents, currentId, currentName)
   const target = el('select') as HTMLSelectElement
   target.className = 'transfer-target'
-  target.append(option('', amountCents < 0 ? 'Vers le compte' : 'Depuis le compte'))
-  for (const item of transferTargets(accountId)) target.append(option(String(item.id), `${item.name} · ${item.bankName}`))
+  appendAccountGroups(target, transferTargets(accountId), amountCents < 0 ? 'Vers le compte' : 'Depuis le compte')
   if (counterpartyAccountId) target.value = String(counterpartyAccountId)
   const sync = () => {
     target.hidden = categoryRole(choice.value) !== 'virement'
@@ -1890,6 +1937,7 @@ async function go(next: Screen): Promise<void> {
   screen = next
   accountTab = 'depense'
   movingCategoryId = null
+  categoriesEdit = false
   operationsEdit = false
   editing = false
   draftBank = null
