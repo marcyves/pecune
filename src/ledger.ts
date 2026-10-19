@@ -591,7 +591,9 @@ export function createSavingsTransfer(
   matchedOperationId: number | null = null,
 ): void {
   const from = getAccount(database, fromAccountId)
-  if (from.kind !== 'epargne') throw new LedgerError('Pour un compte courant, le virement se pointe sur l’opération.')
+  if (from.kind !== 'epargne' && from.kind !== 'titre') {
+    throw new LedgerError('Pour un compte courant, le virement se pointe sur l’opération.')
+  }
   const amount = centsFromInput(rawAmount)
   if (amount === null || amount <= 0) throw new LedgerError('Le montant du virement doit être positif.')
   transaction(database, () => {
@@ -766,7 +768,8 @@ export function accountSummary(database: DatabaseSync, accountId: number, year: 
       (sum, position) => sum + lineMillis(position.quantityMicros, position.valueMillis),
       0,
     )
-    const cashMillis = account.cashMillis ?? 0
+    const cashNow = cashAt(account, titreTransferFlows(database, accountId, todayIso()), todayIso())
+    const cashMillis = cashNow.started ? cashNow.millis : (account.cashMillis ?? 0)
     return {
       kind: 'titre',
       year,
@@ -1112,7 +1115,6 @@ function transferEnds(database: DatabaseSync, fromAccountId: number, toAccountId
   const to = getAccount(database, toAccountId)
   for (const account of [from, to]) {
     if (account.archived) throw new LedgerError('Ce compte est archivé.')
-    if (account.kind === 'titre') throw new LedgerError('Un virement interne va vers un compte courant ou une épargne.')
   }
   return { from, to }
 }
@@ -1125,13 +1127,14 @@ function titreFigures(
   const stored = getAccount(database, account.id)
   const positions = listPositions(database, account.id)
   const movements = manualFlows(database, account.id, `${year}-12-31`)
+  const transfers = titreTransferFlows(database, account.id, `${year}-12-31`)
   const balances: (number | null)[] = []
   const expense: (number | null)[] = []
   const income: (number | null)[] = []
   for (let month = 1; month <= 12; month += 1) {
     const end = lastDay(year, month)
     const monthStart = `${year}-${String(month).padStart(2, '0')}-01`
-    const portfolio = portfolioMillis(stored, positions, end)
+    const portfolio = portfolioMillis(stored, positions, end, transfers)
     let incoming = 0
     let outgoing = 0
     let net = 0
@@ -1141,6 +1144,11 @@ function titreFigures(
         if (row.signed > 0) incoming += row.signed
         if (row.signed < 0) outgoing += -row.signed
       }
+    }
+    for (const row of transfers) {
+      if (!transferAddsCash(stored, row.date, end) || row.date < monthStart) continue
+      if (row.signed > 0) incoming += row.signed
+      if (row.signed < 0) outgoing += -row.signed
     }
     const started = portfolio !== null || movements.some((row) => row.date <= end)
     balances.push(started ? (portfolio ?? 0) + net : null)
@@ -1152,13 +1160,18 @@ function titreFigures(
 
 function titreBalanceAsOf(database: DatabaseSync, account: Account, asOf: string): number | null {
   const stored = getAccount(database, account.id)
-  const portfolio = portfolioMillis(stored, listPositions(database, account.id), asOf)
+  const portfolio = portfolioMillis(stored, listPositions(database, account.id), asOf, titreTransferFlows(database, account.id, asOf))
   const movements = manualFlows(database, account.id, asOf)
   if (portfolio === null && movements.length === 0) return null
   return (portfolio ?? 0) + movements.reduce((sum, row) => sum + row.signed, 0)
 }
 
-function portfolioMillis(account: Account, positions: Position[], asOf: string): number | null {
+function portfolioMillis(
+  account: Account,
+  positions: Position[],
+  asOf: string,
+  cashFlows: { date: string; signed: number }[] = [],
+): number | null {
   let total = 0
   let started = false
   for (const position of positions) {
@@ -1166,11 +1179,47 @@ function portfolioMillis(account: Account, positions: Position[], asOf: string):
     total += lineMillis(position.quantityMicros, position.valueMillis)
     started = true
   }
-  if (account.cashValuedOn && account.cashValuedOn <= asOf) {
-    total += account.cashMillis ?? 0
+  const cash = cashAt(account, cashFlows, asOf)
+  if (cash.started) {
+    total += cash.millis
     started = true
   }
   return started ? total : null
+}
+
+function cashAt(
+  account: Account,
+  flows: { date: string; signed: number }[],
+  asOf: string,
+): { millis: number; started: boolean } {
+  let millis = 0
+  let started = false
+  if (account.cashValuedOn && account.cashValuedOn <= asOf) {
+    millis += account.cashMillis ?? 0
+    started = true
+  }
+  for (const row of flows) {
+    if (!transferAddsCash(account, row.date, asOf)) continue
+    millis += row.signed
+    started = true
+  }
+  return { millis, started }
+}
+
+function transferAddsCash(account: Account, date: string, asOf: string): boolean {
+  if (date > asOf) return false
+  if (account.cashValuedOn && account.cashValuedOn <= asOf && date <= account.cashValuedOn) return false
+  return true
+}
+
+function titreTransferFlows(database: DatabaseSync, accountId: number, until: string): { date: string; signed: number }[] {
+  return savingsTransfers(database, accountId, until).map((row) => {
+    const amount = numberValue(row.amount_cents) * 10
+    let signed = 0
+    if (numberValue(row.to_account_id) === accountId) signed += amount
+    if (numberValue(row.from_account_id) === accountId) signed -= amount
+    return { date: String(row.date), signed }
+  })
 }
 
 function manualFlows(database: DatabaseSync, accountId: number, until: string): { date: string; signed: number }[] {

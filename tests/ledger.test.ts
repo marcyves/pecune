@@ -826,6 +826,72 @@ describe('règles du classeur', () => {
     expect(accountFigures(database, pea, '2026-02-01').currentCents).toBeNull()
   })
 
+  it('verse un virement sur le comptant d’un compte titre', async () => {
+    const { database, dir } = tempDatabase()
+    const pea = createAccount(database, { name: 'PEA', bankName: 'Banque Postale', kind: 'titre' })
+    const livret = createAccount(database, {
+      name: 'Livret A',
+      bankName: 'Banque Postale',
+      kind: 'epargne',
+      openingCents: 100000,
+      openingDate: '2026-01-01',
+    })
+    createSavingsTransfer(database, livret.id, pea.id, '2026-04-10', '25,00')
+    const received = accountSummary(database, pea.id, 2026)
+    if (received.kind !== 'titre') throw new Error('kind')
+    expect(received.cashMillis).toBe(25_000)
+    expect(received.totalMillis).toBe(25_000)
+    expect(received.balances.slice(0, 3).every((value) => value === null)).toBe(true)
+    expect(received.balances[3]).toBe(25_000)
+    expect(received.income[3]).toBe(25_000)
+    expect(received.balances[11]).toBe(25_000)
+    expect(listOperations(database, pea.id, 2026)).toEqual([])
+    expect(accountFigures(database, livret, '2026-04-10').currentCents).toBe(97_500)
+
+    setCash(database, pea.id, '10,00', '2026-06-01')
+    const valued = accountSummary(database, pea.id, 2026)
+    if (valued.kind !== 'titre') throw new Error('kind')
+    expect(valued.balances[3]).toBe(25_000)
+    expect(valued.balances[5]).toBe(10_000)
+    expect(valued.cashMillis).toBe(10_000)
+
+    createSavingsTransfer(database, livret.id, pea.id, '2026-08-02', '5,00')
+    const later = accountSummary(database, pea.id, 2026)
+    if (later.kind !== 'titre') throw new Error('kind')
+    expect(later.balances[6]).toBe(10_000)
+    expect(later.balances[7]).toBe(15_000)
+    expect(later.income[7]).toBe(5_000)
+    expect(later.cashMillis).toBe(15_000)
+    const global = globalSummary(database, 2026).banks[0].accounts.find((account) => account.accountName === 'PEA')
+    expect(global?.balance[7]).toBe(1_500)
+    expect(global?.income[7]).toBe(500)
+
+    const ccp = createAccount(database, {
+      name: 'CCP',
+      bankName: 'Banque Postale',
+      kind: 'courant',
+      mapping: signed,
+      openingCents: 0,
+      openingDate: '2026-01-01',
+    })
+    await confirmImport(database, ccp.id, csv(dir, 'pea.csv', 'Date;Libelle;Montant\n03/09/2026;VIR PEA;-30,00\n'))
+    const line = listOperations(database, ccp.id, 2026)[0]
+    pointOperation(database, line.id, outgoingCategory(database), pea.id)
+    const funded = accountSummary(database, pea.id, 2026)
+    if (funded.kind !== 'titre') throw new Error('kind')
+    expect(funded.balances[8]).toBe(45_000)
+    expect(funded.cashMillis).toBe(45_000)
+    expect(listOperations(database, pea.id, 2026)).toEqual([])
+
+    const extra = database.prepare('SELECT id FROM transfers WHERE to_account_id = ? AND amount_cents = ?').get(pea.id, 500) as { id: number }
+    deleteTransfer(database, extra.id)
+    const removed = accountSummary(database, pea.id, 2026)
+    if (removed.kind !== 'titre') throw new Error('kind')
+    expect(removed.balances[7]).toBe(10_000)
+    expect(removed.balances[8]).toBe(40_000)
+    expect(removed.cashMillis).toBe(40_000)
+  })
+
   it('calcule le solde courant et le solde non pointé', async () => {
     const { database, dir } = tempDatabase()
     const account = createAccount(database, {

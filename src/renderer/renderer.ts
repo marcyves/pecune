@@ -715,7 +715,7 @@ function operationsPane(account: Account): HTMLElement {
   if (account.kind === 'courant') return renderOperations(detail?.operations ?? [], account.id)
   const page = el('div')
   page.append(movementEditor(account))
-  if (account.kind === 'epargne') page.append(transferEditor(account))
+  if (account.kind === 'epargne' || account.kind === 'titre') page.append(transferEditor(account))
   return page
 }
 
@@ -885,7 +885,8 @@ function holdingsEditor(account: Account, summary: HoldingsSummary): HTMLElement
     )
     table.append(row)
   }
-  const cash = amountInput(formatInputMillis(summary.cashMillis))
+  const typedCash = account.cashMillis ?? 0
+  const cash = amountInput(formatInputMillis(typedCash))
   const cashDate = dateInput(summary.cashValuedOn || todayIso())
   const cashActions = el('div', 'toolbar')
   cashActions.append(
@@ -893,8 +894,11 @@ function holdingsEditor(account: Account, summary: HoldingsSummary): HTMLElement
       void persistCash(account.id, cash.value, cashDate.value)
     }),
   )
+  const cashAmount = el('td')
+  if (summary.cashMillis !== typedCash) cashAmount.append(el('strong', '', formatMillis(summary.cashMillis)))
+  cashAmount.append(cash)
   const cashRow = el('tr')
-  cashRow.append(el('td', '', 'Disponible au comptant'), el('td'), el('td'), cell(cash), cell(cashDate), cell(cashActions))
+  cashRow.append(el('td', '', 'Disponible au comptant'), el('td'), el('td'), cashAmount, cell(cashDate), cell(cashActions))
   table.append(cashRow)
   table.append(holdingTotal('Solde des titres', summary.securitiesMillis))
   table.append(holdingTotal('Solde global', summary.totalMillis))
@@ -1212,7 +1216,15 @@ function movementTable(operations: OperationView[]): HTMLElement {
 function transferEditor(account: Account): HTMLElement {
   const card = el('section', 'card')
   card.append(el('h2', '', 'Virements'))
-  card.append(el('p', 'muted', 'Sortie vers un autre compte. Le destinataire reçoit le mouvement, et le solde affiché est recalculé.'))
+  card.append(
+    el(
+      'p',
+      'muted',
+      account.kind === 'titre'
+        ? 'Une entrée augmente le comptant, une sortie le diminue.'
+        : 'Sortie vers un autre compte. Sur un compte titre, le montant va au comptant.',
+    ),
+  )
   const targets = transferTargets(account.id)
   const date = dateInput(todayIso())
   const amount = amountInput('')
@@ -1286,7 +1298,7 @@ function transferEditor(account: Account): HTMLElement {
 
 function transferTargets(exceptId: number): AccountCard[] {
   return (workspace?.accounts ?? []).filter(
-    (item) => !item.archived && item.id !== exceptId && (item.kind === 'courant' || item.kind === 'epargne'),
+    (item) => !item.archived && item.id !== exceptId,
   )
 }
 
