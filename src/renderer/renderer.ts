@@ -540,7 +540,7 @@ function naturePane(summary: AccountSummary, nature: Nature): HTMLElement {
   }
   const values = nature === 'depense' ? summary.expense : summary.income
   const label = nature === 'depense' ? 'Dépense' : 'Encaissement'
-  card.append(monthTable(label, displayCents(values, true), ''))
+  card.append(monthTable(label, displayCents(values, true), '', true))
   return card
 }
 
@@ -552,10 +552,10 @@ function operationsPane(account: Account): HTMLElement {
   return page
 }
 
-function monthTable(label: string, values: readonly (number | null)[], className: string): HTMLElement {
+function monthTable(label: string, values: readonly (number | null)[], className: string, withTotal = false): HTMLElement {
   const table = el('table', 'grid')
-  table.append(monthHead())
-  table.append(amountRow(label, values, className))
+  table.append(monthHead(withTotal))
+  table.append(amountRow(label, values, className, withTotal))
   return wrap(table)
 }
 
@@ -825,13 +825,13 @@ function categoryBlock(
   const box = el('div')
   if (title) box.append(el('h3', '', title))
   const table = el('table', 'grid')
-  table.append(monthHead())
+  table.append(monthHead(true))
   for (const family of families) {
-    table.append(amountRow(family.name, family.months, 'family'))
+    table.append(amountRow(family.name, family.months, 'family', true))
     for (const category of family.categories) table.append(categoryDrillRow(category, nature))
   }
   table.append(unpointedDrillRow(unpointed, nature))
-  table.append(amountRow('Total', totals, 'total'))
+  table.append(amountRow('Total', totals, 'total', true))
   box.append(wrap(table))
   return box
 }
@@ -845,6 +845,9 @@ function categoryDrillRow(category: CategoryRow, nature: Nature): HTMLElement {
     ),
   )
   row.append(name)
+  row.append(yearDrillCell(category.months, drillMatches(category.categoryId, nature, null), () =>
+    openDrill({ categoryId: category.categoryId, nature, name: category.name, month: null }),
+  ))
   category.months.forEach((value, index) => {
     row.append(drillAmount(value, drillMatches(category.categoryId, nature, index + 1), () =>
       openDrill({ categoryId: category.categoryId, nature, name: category.name, month: index + 1 }),
@@ -862,6 +865,9 @@ function unpointedDrillRow(values: number[], nature: Nature): HTMLElement {
     ),
   )
   row.append(name)
+  row.append(yearDrillCell(values, drillMatches(null, nature, null), () =>
+    openDrill({ categoryId: null, nature, name: 'Non pointé', month: null }),
+  ))
   values.forEach((value, index) => {
     row.append(drillAmount(value, drillMatches(null, nature, index + 1), () =>
       openDrill({ categoryId: null, nature, name: 'Non pointé', month: index + 1 }),
@@ -1709,9 +1715,10 @@ function knownBanks(): string[] {
   return [...names].sort((a, b) => a.localeCompare(b, 'fr'))
 }
 
-function monthHead(): HTMLElement {
+function monthHead(withTotal = false): HTMLElement {
   const row = el('tr')
   row.append(el('th', '', ''))
+  if (withTotal) row.append(el('th', 'num year-total', 'Total'))
   for (const label of SHORT) row.append(el('th', 'num', label))
   return row
 }
@@ -1722,10 +1729,29 @@ function labelRow(label: string, className: string): HTMLElement {
   return row
 }
 
-function amountRow(label: string, values: readonly (number | null)[], className: string): HTMLElement {
+function amountRow(label: string, values: readonly (number | null)[], className: string, withTotal = false): HTMLElement {
   const row = labelRow(label, className)
+  if (withTotal) row.append(yearTotalCell(values))
   addAmounts(row, values)
   return row
+}
+
+function yearDrillCell(values: readonly number[], active: boolean, onClick: () => void): HTMLElement {
+  const cell = drillAmount(yearTotal(values) ?? 0, active, onClick)
+  cell.classList.add('year-total')
+  return cell
+}
+
+function yearTotalCell(values: readonly (number | null)[]): HTMLElement {
+  const total = yearTotal(values)
+  const cell = total === null ? el('td', 'num') : moneyCell(total)
+  cell.classList.add('year-total')
+  return cell
+}
+
+function yearTotal(values: readonly (number | null)[]): number | null {
+  if (values.every((value) => value === null)) return null
+  return values.reduce<number>((sum, value) => sum + (value ?? 0), 0)
 }
 
 function addAmounts(row: HTMLElement, values: readonly (number | null)[]): void {

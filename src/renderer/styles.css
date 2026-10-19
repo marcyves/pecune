@@ -292,6 +292,9 @@ table.holdings th:nth-child(4),
 table.holdings td:nth-child(4) { min-width: 11rem; }
 table.holdings td:last-child { white-space: normal; }
 
+table.grid th.year-total,
+table.grid td.year-total { border-right: 1px solid #d9cebf; }
+
 .num { text-align: right; }
 .neg { color: #8d2f2f; }
 .pos { color: #1d6b45; }
