@@ -7,6 +7,7 @@
   "scripts": {
     "build": "node build.mjs",
     "start": "npm run build && electron .",
+    "dist:mac": "npm run build && electron-builder --mac",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
@@ -16,8 +17,27 @@
   "devDependencies": {
     "@types/node": "^26.6.5",
     "electron": "^44.7.2",
+    "electron-builder": "^26.8.1",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2",
+    "vite": "^8.3.4",
     "vitest": "^5.0.4"
+  },
+  "build": {
+    "appId": "app.pecune",
+    "productName": "Pécune",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.finance",
+      "target": ["dmg"],
+      "identity": "-",
+      "gatekeeperAssess": false
+    }
   }
 }

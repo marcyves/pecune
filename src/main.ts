@@ -49,6 +49,8 @@ import type { AccountKind, Mapping } from './types.ts'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 
+app.setPath('userData', path.join(app.getPath('appData'), 'pecune'))
+
 let database: DatabaseSync | null = null
 let databasePath: string | null = null
 
