@@ -38,7 +38,10 @@
       "icon": "build/icon.png",
       "target": ["dmg"],
       "identity": "-",
-      "gatekeeperAssess": false
+      "gatekeeperAssess": false,
+      "extendInfo": {
+        "CFBundleName": "Pe\u0301cune"
+      }
     }
   }
 }
