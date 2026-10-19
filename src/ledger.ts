@@ -242,6 +242,27 @@ export function moveCategory(database: DatabaseSync, id: number, direction: -1 |
   moveRow(database, 'categories', id, direction, 'WHERE family_id = ?', [category.familyId])
 }
 
+export function categoryTotals(database: DatabaseSync, year: number): Map<number, number> {
+  const totals = new Map<number, number>()
+  const rows = all(
+    database,
+    `SELECT o.category_id, o.amount_cents, o.date, a.opening_date
+     FROM operations o
+     JOIN accounts a ON a.id = o.account_id
+     WHERE o.category_id IS NOT NULL AND a.kind = 'courant' AND o.date >= ? AND o.date <= ?`,
+    [`${year}-01-01`, `${year}-12-31`],
+  )
+  for (const row of rows) {
+    const date = String(row.date)
+    const opening = row.opening_date === null ? null : String(row.opening_date)
+    const month = Number(date.slice(5, 7))
+    if (opening && monthEntirelyBefore(Number(date.slice(0, 4)), month, opening)) continue
+    const categoryId = numberValue(row.category_id)
+    totals.set(categoryId, (totals.get(categoryId) ?? 0) + numberValue(row.amount_cents))
+  }
+  return totals
+}
+
 export function listFamilies(database: DatabaseSync): Family[] {
   const families = all(database, 'SELECT * FROM families ORDER BY sort_order, id').map(mapFamily)
   const categories = all(database, 'SELECT * FROM categories ORDER BY sort_order, id').map(mapCategory)

@@ -11,6 +11,7 @@ import {
   accountFigures,
   accountSummary,
   cancelBatch,
+  categoryTotals,
   confirmImport,
   createAccount,
   createCategory,
@@ -428,6 +429,34 @@ describe('règles du classeur', () => {
     await confirmImport(database, account.id, fresh)
     expect(listUnpointed(database, account.id)[0].suggestedCategoryId).toBeNull()
     expect(listOperations(database, account.id, 2026).some((row) => row.categoryName === 'Supermarché')).toBe(true)
+  })
+
+  it('totalise une catégorie sur l’année des comptes courants', async () => {
+    const { database, dir } = tempDatabase()
+    const account = createAccount(database, {
+      name: 'CCP',
+      bankName: 'Banque Postale',
+      kind: 'courant',
+      mapping: signed,
+    })
+    const frais = createFamily(database, { name: 'Frais généraux', nature: 'depense' })
+    const courses = createCategory(database, { name: 'Courses', familyId: frais.id })
+    const file = csv(dir, 'a.csv', 'Date;Libelle;Montant\n10/01/2026;AUCHAN;-10,00\n15/02/2026;AUCHAN;-2,50\n20/02/2026;MARCHE;-1,00\n')
+    await confirmImport(database, account.id, file)
+    const rows = listUnpointed(database, account.id)
+    pointOperation(database, rows.find((row) => row.date === '2026-01-10')!.id, courses.id)
+    pointOperation(database, rows.find((row) => row.date === '2026-02-15')!.id, courses.id)
+    expect(categoryTotals(database, 2026).get(courses.id)).toBe(-1250)
+    updateAccount(database, account.id, {
+      name: account.name,
+      bankName: account.bankName,
+      archived: false,
+      mapping: signed,
+      openingCents: 0,
+      openingDate: '2026-02-01',
+    })
+    expect(categoryTotals(database, 2026).get(courses.id)).toBe(-250)
+    expect(categoryTotals(database, 2025).has(courses.id)).toBe(false)
   })
 
   it('déplace une catégorie vers une autre famille de la même nature', () => {

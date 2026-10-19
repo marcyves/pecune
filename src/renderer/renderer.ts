@@ -5,6 +5,7 @@ import type {
   Account,
   AccountSummary,
   BatchView,
+  Category,
   CategoryRow,
   Family,
   GlobalSummary,
@@ -35,6 +36,7 @@ type Workspace = {
   databasePath: string | null
   accounts: AccountCard[]
   families: Family[]
+  categoryTotals: { categoryId: number; totalCents: number }[]
   global: GlobalSummary
 }
 
@@ -128,6 +130,7 @@ let pointFilter: number | null = null
 let editingOperationId: number | null = null
 let globalView: 'balance' | 'expense' | 'income' = 'balance'
 let accountTab: 'depense' | 'encaissement' | 'operations' = 'depense'
+let movingCategoryId: number | null = null
 let notice = ''
 let importFile: string | null = null
 let importSheet = ''
@@ -172,8 +175,10 @@ async function boot(): Promise<void> {
 }
 
 document.addEventListener('keydown', (event) => {
-  if (event.key !== 'Escape' || !drill) return
+  if (event.key !== 'Escape') return
+  if (!drill && movingCategoryId === null) return
   drill = null
+  movingCategoryId = null
   render()
 })
 
@@ -1360,47 +1365,47 @@ function familyCard(family: Family): HTMLElement {
   for (const category of family.categories) {
     const categoryName = textInput(category.name)
     categoryName.setAttribute('aria-label', 'Nom de la catégorie')
-    const familySelect = el('select') as HTMLSelectElement
-    familySelect.setAttribute('aria-label', 'Famille')
-    for (const candidate of (workspace?.families ?? []).filter((item) => item.nature === family.nature)) {
-      const choice = option(String(candidate.id), candidate.archived ? `${candidate.name} (archivée)` : candidate.name)
-      if (candidate.id === category.familyId) choice.selected = true
-      familySelect.append(choice)
-    }
+    const targets = (workspace?.families ?? []).filter((item) => item.nature === family.nature && item.id !== family.id)
+    const moving = movingCategoryId === category.id
+    const moveButton = glyphButton('Déplacer', 'move', () => {
+      if (targets.length === 0) {
+        notice = 'Aucune autre famille de cette nature.'
+        render()
+        return
+      }
+      movingCategoryId = moving ? null : category.id
+      render()
+    })
+    if (moving) moveButton.classList.add('active')
+    moveButton.setAttribute('aria-expanded', String(moving))
+    const total = categoryTotal(category.id)
+    const amount = el('span', `category-total${total < 0 ? ' neg' : total === 0 ? ' muted' : ''}`, formatEuros(total))
+    amount.title = `Total ${year}`
     const row = el('div', 'category-line')
-    row.append(categoryName, familySelect)
+    row.append(categoryName, amount, moveButton)
     row.append(glyphButton('Haut', 'up', () => move('category', category.id, -1)))
     row.append(glyphButton('Bas', 'down', () => move('category', category.id, 1)))
     row.append(
       glyphButton('Enregistrer', 'check', async () => {
-        await ask(
-          window.comptes.saveCategory({
-            id: category.id,
-            name: categoryName.value,
-            familyId: Number(familySelect.value),
-            archived: category.archived,
-          }),
-        )
-        await loadWorkspace()
-        render()
+        await saveCategoryLine(category, categoryName.value, family.id)
       }, 'primary'),
     )
     row.append(
       glyphButton(category.archived ? 'Réactiver' : 'Archiver', category.archived ? 'restore' : 'archive', async () => {
         if (!category.archived && !window.confirm(`Archiver la catégorie ${category.name} ?`)) return
-        await ask(
-          window.comptes.saveCategory({
-            id: category.id,
-            name: categoryName.value,
-            familyId: Number(familySelect.value),
-            archived: !category.archived,
-          }),
-        )
-        await loadWorkspace()
-        render()
+        await saveCategoryLine(category, categoryName.value, family.id, !category.archived)
       }, category.archived ? '' : 'danger'),
     )
-    list.append(el('li', '', row))
+    const item = el('li', '', row)
+    if (moving) {
+      const choices = el('div', 'move-choices')
+      for (const target of targets) {
+        const label = target.archived ? `${target.name} (archivée)` : target.name
+        choices.append(button(label, 'small', () => { void saveCategoryLine(category, categoryName.value, target.id) }))
+      }
+      item.append(choices)
+    }
+    list.append(item)
   }
   card.append(list)
   const add = textInput('')
@@ -1421,6 +1426,21 @@ function familyCard(family: Family): HTMLElement {
   )
   card.append(addRow)
   return card
+}
+
+function categoryTotal(categoryId: number): number {
+  return workspace?.categoryTotals.find((item) => item.categoryId === categoryId)?.totalCents ?? 0
+}
+
+async function saveCategoryLine(category: Category, name: string, familyId: number, archived = category.archived): Promise<void> {
+  const saved = await ask(window.comptes.saveCategory({ id: category.id, name, familyId, archived }))
+  if (!saved) {
+    render()
+    return
+  }
+  movingCategoryId = null
+  await loadWorkspace()
+  render()
 }
 
 function operationActions(
@@ -1665,6 +1685,7 @@ async function move(kind: 'family' | 'category', id: number, direction: -1 | 1):
 async function go(next: Screen): Promise<void> {
   screen = next
   accountTab = 'depense'
+  movingCategoryId = null
   editing = false
   draftBank = null
   preview = null
@@ -1873,7 +1894,7 @@ function plusButton(label: string, onClick: () => void): HTMLButtonElement {
 
 function glyphButton(
   label: string,
-  glyph: 'up' | 'down' | 'check' | 'plus' | 'archive' | 'restore' | 'back',
+  glyph: 'up' | 'down' | 'check' | 'plus' | 'archive' | 'restore' | 'back' | 'move',
   onClick: () => void,
   tone = '',
 ): HTMLButtonElement {
@@ -1887,6 +1908,7 @@ function glyphButton(
     restore:
       '<path d="M3.2 8a4.4 4.4 0 1 0 1.2-3.1M3 3.2v3.3h3.3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
     back: '<path d="M10 3.5 5.5 8 10 12.5M5.5 8H13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+    move: '<path d="M2 8h6.2M6 5.2 8.8 8 6 10.8M10.2 3.2H13v9.6h-2.8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
   }
   const item = document.createElement('button')
   item.type = 'button'

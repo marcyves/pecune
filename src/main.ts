@@ -11,6 +11,7 @@ import {
   accountFigures,
   accountSummary,
   cancelBatch,
+  categoryTotals,
   centsFromInput,
   confirmImport,
   createAccount,
@@ -137,6 +138,7 @@ function workspace(year: number) {
     databasePath,
     accounts: listAccounts(db).map((account) => ({ ...account, ...accountFigures(db, account, asOf) })),
     families: listFamilies(db),
+    categoryTotals: [...categoryTotals(db, year)].map(([categoryId, totalCents]) => ({ categoryId, totalCents })),
     global: globalSummary(db, year),
   }
 }

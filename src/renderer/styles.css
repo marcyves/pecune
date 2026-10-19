@@ -229,7 +229,27 @@ label.inline-label {
   font-size: 1rem;
 }
 
-.category-line select { max-width: 11rem; }
+.category-line input[type='text'] { flex: 1 1 8rem; }
+
+.category-total {
+  flex: 0 0 auto;
+  min-width: 6.5rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+button.icon.active {
+  background: #1f4a38;
+  color: #f6f1e7;
+  border-color: #1f4a38;
+}
+
+.move-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.35rem;
+}
 
 .category-list {
   margin: 0.75rem 0 0.45rem;
