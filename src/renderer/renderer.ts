@@ -113,7 +113,7 @@ type ComptesApi = {
   ) => Promise<Result<unknown>>
   deleteTransfer: (transferId: number) => Promise<Result<unknown>>
   unpointOperation: (operationId: number) => Promise<Result<unknown>>
-  updateManualOperation: (operationId: number, date: string, label: string, amount: string) => Promise<Result<unknown>>
+  updateManualOperation: (operationId: number, date: string, label: string, amount: string, valueDate: string) => Promise<Result<unknown>>
   deleteManualOperation: (operationId: number) => Promise<Result<unknown>>
 }
 
@@ -1259,7 +1259,7 @@ function drillPanel(): HTMLElement {
   const table = lineTable('Date', 'Libellé', 'Montant')
   for (const operation of operations) {
     const row = el('tr')
-    row.append(dateCell(formatIsoDate(operation.date)), labelText(operation.label), moneyCell(operation.amountCents))
+    row.append(datedCell(operation.date, operation.valueDate), labelText(operation.label), moneyCell(operation.amountCents))
     table.append(row)
   }
   panel.append(wrap(table))
@@ -1359,7 +1359,7 @@ function movementTable(operations: OperationView[]): HTMLElement {
   const table = lineTable('Date', 'Libellé', 'Montant')
   for (const operation of operations) {
     const row = el('tr')
-    row.append(dateCell(formatIsoDate(operation.date)), labelText(operation.label), millisCell(operation.amountCents))
+    row.append(datedCell(operation.date, operation.valueDate), labelText(operation.label), millisCell(operation.amountCents))
     table.append(row)
   }
   return wrap(table)
@@ -1514,7 +1514,7 @@ function renderOperations(operations: OperationView[], accountId: number): HTMLE
     const table = lineTable('Date', 'Libellé', 'Montant', 'Catégorie', '')
     for (const operation of operations) {
       const row = el('tr')
-      row.append(dateCell(formatIsoDate(operation.date)), labelText(operation.label), moneyCell(operation.amountCents))
+      row.append(datedCell(operation.date, operation.valueDate), labelText(operation.label), moneyCell(operation.amountCents))
       row.append(
         pointCell(
           operation.amountCents,
@@ -1622,10 +1622,13 @@ function renderPointing(): HTMLElement {
       const date = dateInput(row.date)
       const label = labelField(row.label)
       const amount = amountInput(formatInputAmount(row.amountCents))
-      line.append(dateCell(date), accountCell, labelEditor(label), amountCell(amount), el('td', 'point'))
-      line.append(operationActions(lineRef, { date, label, amount }, true))
+      const valueDate = dateInput(row.valueDate ?? '')
+      const valueBox = el('label', 'value-edit', 'Date de valeur')
+      valueBox.append(valueDate)
+      line.append(dateCell(date), accountCell, labelEditor(label, valueBox), amountCell(amount), el('td', 'point'))
+      line.append(operationActions(lineRef, { date, label, amount, valueDate }, true))
     } else {
-      line.append(dateCell(formatIsoDate(row.date)), accountCell, labelText(row.label), moneyCell(row.amountCents))
+      line.append(datedCell(row.date, row.valueDate), accountCell, labelText(row.label), moneyCell(row.amountCents))
       line.append(pointCell(row.amountCents, row.suggestedCategoryId, null, row.id, row.accountId, null, async () => {
         await loadUnpointed()
         if (screen === 'account') await loadDetail()
@@ -1882,6 +1885,15 @@ function amountCell(field: HTMLInputElement): HTMLElement {
   return cell
 }
 
+function datedCell(operationDate: string, valueDate: string | null): HTMLElement {
+  const cell = el('td', 'when')
+  cell.append(formatIsoDate(operationDate))
+  if (valueDate && valueDate !== operationDate) {
+    cell.append(el('div', 'value-date', `valeur ${formatIsoDate(valueDate)}`))
+  }
+  return cell
+}
+
 function dateCell(value: string | HTMLElement): HTMLElement {
   if (typeof value === 'string') return el('td', 'when', value)
   const cell = el('td', 'when')
@@ -1904,22 +1916,23 @@ function labelField(value: string): HTMLTextAreaElement {
   return input
 }
 
-function labelEditor(field: HTMLTextAreaElement): HTMLElement {
+function labelEditor(field: HTMLTextAreaElement, extra?: HTMLElement): HTMLElement {
   const cell = el('td', 'clip-label')
   cell.append(field)
+  if (extra) cell.append(extra)
   return cell
 }
 
 function operationActions(
   operation: { id: number; label: string; categoryId: number | null },
-  editing?: { date: HTMLInputElement; label: HTMLTextAreaElement; amount: HTMLInputElement },
+  editing?: { date: HTMLInputElement; label: HTMLTextAreaElement; amount: HTMLInputElement; valueDate?: HTMLInputElement },
   manage = false,
 ): HTMLElement {
   const actions = el('td', 'actions')
   if (editing) {
     actions.append(
       button('Enregistrer', 'small', () => {
-        void saveManual(operation.id, editing.date.value, editing.label.value, editing.amount.value)
+        void saveManual(operation.id, editing.date.value, editing.label.value, editing.amount.value, editing.valueDate?.value ?? '')
       }),
       button('Annuler', 'small', () => {
         editingOperationId = null
@@ -1968,8 +1981,8 @@ async function clearPoint(operationId: number): Promise<void> {
   render()
 }
 
-async function saveManual(operationId: number, date: string, label: string, amount: string): Promise<void> {
-  const saved = await ask(window.comptes.updateManualOperation(operationId, date, label, amount))
+async function saveManual(operationId: number, date: string, label: string, amount: string, valueDate = ''): Promise<void> {
+  const saved = await ask(window.comptes.updateManualOperation(operationId, date, label, amount, valueDate))
   if (saved === null) {
     render()
     return

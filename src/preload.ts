@@ -51,8 +51,8 @@ const comptes = {
     call<unknown>('createTransfer', fromAccountId, toAccountId, date, amount, matchedOperationId),
   deleteTransfer: (transferId: number) => call<unknown>('deleteTransfer', transferId),
   unpointOperation: (operationId: number) => call<unknown>('unpointOperation', operationId),
-  updateManualOperation: (operationId: number, date: string, label: string, amount: string) =>
-    call<unknown>('updateManualOperation', operationId, date, label, amount),
+  updateManualOperation: (operationId: number, date: string, label: string, amount: string, valueDate: string) =>
+    call<unknown>('updateManualOperation', operationId, date, label, amount, valueDate),
   deleteManualOperation: (operationId: number) => call<unknown>('deleteManualOperation', operationId),
 }
 

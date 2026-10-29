@@ -121,7 +121,7 @@ describe('base', () => {
     const database = openDatabase(path)
     databases.push(database)
     const version = database.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as { value: string }
-    expect(version.value).toBe('12')
+    expect(version.value).toBe('13')
     const legacy = listAccounts(database).find((account) => account.bankName === 'Banque Postale')
     expect(legacy?.kind).toBe('epargne')
     expect(legacy?.cashMillis).toBeNull()
@@ -1182,6 +1182,112 @@ describe('règles du classeur', () => {
     expect(check.unit).toBe('millis')
     expect(check.cents).toBe(96000)
     expect(check.movements).toEqual([{ date: '2026-02-10', label: 'Virement vers CCP', amount: -40000 }])
+  })
+
+  it('décale le solde d’un chèque jusqu’à sa date de valeur', () => {
+    const { database } = tempDatabase()
+    const account = createAccount(database, {
+      name: 'CCP',
+      bankName: 'Banque Postale',
+      kind: 'courant',
+      mapping: signed,
+      openingCents: 10000,
+      openingDate: '2026-01-01',
+    })
+    createOperation(database, account.id, '2026-03-28', 'CHEQUE', '50,00')
+    const line = listOperations(database, account.id, 2026)[0]
+    expect(accountFigures(database, account, '2026-03-31').currentCents).toBe(15000)
+    updateManualOperation(database, line.id, '2026-03-28', 'CHEQUE', '50,00', '2026-04-02')
+    expect(listOperations(database, account.id, 2026)[0].valueDate).toBe('2026-04-02')
+    expect(listUnpointed(database, account.id)[0].valueDate).toBe('2026-04-02')
+    expect(accountFigures(database, account, '2026-03-31').currentCents).toBe(10000)
+    expect(accountFigures(database, account, '2026-04-01').currentCents).toBe(10000)
+    expect(accountFigures(database, account, '2026-04-02').currentCents).toBe(15000)
+    expect(statementAt(database, account.id, '2026-03-31').unpointedCount).toBe(0)
+    expect(statementAt(database, account.id, '2026-04-02').unpointedCount).toBe(1)
+    const gains = createFamily(database, { name: 'Divers', nature: 'encaissement' })
+    const cheque = createCategory(database, { name: 'Chèque', familyId: gains.id })
+    pointOperation(database, line.id, cheque.id)
+    const summary = accountSummary(database, account.id, 2026)
+    if (summary.kind !== 'courant') throw new Error('kind')
+    expect(summary.incomeTotals[2]).toBe(5000)
+    expect(summary.incomeTotals[3]).toBe(0)
+    expect(summary.balances[2]).toBe(10000)
+    expect(summary.balances[3]).toBe(15000)
+    validateStatement(database, account.id, '2026-03-31')
+    expect(statementAt(database, account.id, '2026-04-30').movements).toEqual([
+      { date: '2026-04-02', label: 'CHEQUE', amount: 5000 },
+    ])
+    updateManualOperation(database, line.id, '2026-03-28', 'CHEQUE', '50,00', '')
+    expect(listOperations(database, account.id, 2026)[0].valueDate).toBeNull()
+    expect(accountFigures(database, account, '2026-03-31').currentCents).toBe(15000)
+    updateManualOperation(database, line.id, '2026-03-28', 'CHEQUE', '50,00', '2026-03-28')
+    expect(listOperations(database, account.id, 2026)[0].valueDate).toBeNull()
+    expect(() => updateManualOperation(database, line.id, '2026-03-28', 'CHEQUE', '50,00', '2025-12-31')).toThrow(/ouverture/)
+
+    const livret = createAccount(database, {
+      name: 'Livret A',
+      bankName: 'Banque Postale',
+      kind: 'epargne',
+      openingCents: 50000,
+      openingDate: '2026-01-01',
+    })
+    createSavingsMovement(database, livret.id, '2026-03-28', 'Intérêts', '1,500', 'entree')
+    const interest = listOperations(database, livret.id, 2026)[0]
+    updateManualOperation(database, interest.id, '2026-03-28', 'Intérêts', '1,500', '2026-04-02')
+    const saved = accountSummary(database, livret.id, 2026)
+    if (saved.kind !== 'epargne') throw new Error('kind')
+    expect(saved.income[2]).toBe(1500)
+    expect(saved.income[3]).toBeNull()
+    expect(saved.balances[2]).toBe(500000)
+    expect(saved.balances[3]).toBe(501500)
+    expect(accountFigures(database, livret, '2026-03-31').currentCents).toBe(50000)
+    expect(accountFigures(database, livret, '2026-04-02').currentCents).toBe(50150)
+  })
+
+  it('rapproche un virement décalé d’un jour ouvré', () => {
+    const { database } = tempDatabase()
+    const ccp = createAccount(database, {
+      name: 'CCP',
+      bankName: 'Banque Postale',
+      kind: 'courant',
+      mapping: signed,
+      openingCents: 0,
+      openingDate: '2026-01-01',
+    })
+    const joint = createAccount(database, {
+      name: 'Joint',
+      bankName: 'CCF',
+      kind: 'courant',
+      mapping: signed,
+      openingCents: 0,
+      openingDate: '2026-01-01',
+    })
+    createOperation(database, joint.id, '2026-03-08', 'VIR', '40,00')
+    createOperation(database, ccp.id, '2026-03-09', 'VIR', '-40,00')
+    createOperation(database, joint.id, '2026-03-06', 'VIR VENDREDI', '25,00')
+    createOperation(database, ccp.id, '2026-03-09', 'VIR VENDREDI', '-25,00')
+    createOperation(database, joint.id, '2026-03-05', 'VIR JEUDI', '15,00')
+    createOperation(database, ccp.id, '2026-03-09', 'VIR JEUDI', '-15,00')
+    const sunday = listOperations(database, joint.id, 2026).find((row) => row.date === '2026-03-08')
+    const friday = listOperations(database, joint.id, 2026).find((row) => row.date === '2026-03-06')
+    const monday = listOperations(database, ccp.id, 2026)
+    const mondayForty = monday.find((row) => row.amountCents === -4000)
+    const mondayTwenty = monday.find((row) => row.amountCents === -2500)
+    const mondayFifteen = monday.find((row) => row.amountCents === -1500)
+    expect(previewOperationTransfer(database, mondayForty!.id, joint.id).map((row) => row.id)).toEqual([sunday!.id])
+    expect(previewOperationTransfer(database, mondayTwenty!.id, joint.id).map((row) => row.id)).toEqual([friday!.id])
+    expect(previewOperationTransfer(database, mondayFifteen!.id, joint.id)).toEqual([])
+    expect(previewSavingsTransfer(database, joint.id, '2026-03-09', '40,00').map((row) => row.id)).toEqual([sunday!.id])
+    pointOperation(database, mondayForty!.id, outgoingCategory(database), joint.id, sunday!.id)
+    expect(listOperations(database, joint.id, 2026).find((row) => row.id === sunday!.id)?.date).toBe('2026-03-08')
+    const transfer = database.prepare('SELECT date FROM transfers').get() as { date: string }
+    expect(transfer.date).toBe('2026-03-09')
+    expect(() => updateManualOperation(database, sunday!.id, '2026-03-09', 'VIR', '40,00', '2026-03-10')).toThrow(/pointage/)
+    updateManualOperation(database, sunday!.id, '2026-03-08', 'VIR', '40,00', '2026-03-10')
+    const kept = listOperations(database, joint.id, 2026).find((row) => row.id === sunday!.id)
+    expect(kept?.date).toBe('2026-03-08')
+    expect(kept?.valueDate).toBe('2026-03-10')
   })
 })
 

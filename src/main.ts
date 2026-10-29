@@ -373,8 +373,15 @@ function register(): void {
   )
   handle('deleteTransfer', (transferId) => deleteTransfer(requireDatabase(), Number(transferId)))
   handle('unpointOperation', (operationId) => unpointOperation(requireDatabase(), Number(operationId)))
-  handle('updateManualOperation', (operationId, date, label, amount) =>
-    updateManualOperation(requireDatabase(), Number(operationId), String(date ?? ''), String(label ?? ''), String(amount ?? '')),
+  handle('updateManualOperation', (operationId, date, label, amount, valueDate) =>
+    updateManualOperation(
+      requireDatabase(),
+      Number(operationId),
+      String(date ?? ''),
+      String(label ?? ''),
+      String(amount ?? ''),
+      String(valueDate ?? ''),
+    ),
   )
   handle('deleteManualOperation', (operationId) => deleteManualOperation(requireDatabase(), Number(operationId)))
 }

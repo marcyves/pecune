@@ -593,6 +593,31 @@ table.grid.lines td.num {
   max-width: calc(12ch + 1.1rem);
 }
 
+table.grid.lines td.when .value-date {
+  display: block;
+  margin-top: 0.15rem;
+  color: #6d645b;
+  font-size: 0.75rem;
+  line-height: 1.25;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+table.grid.lines td .value-edit {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+  margin-top: 0.45rem;
+  color: #6d645b;
+  font-size: 0.8rem;
+}
+
+table.grid.lines td .value-edit input.valued-on {
+  width: 11rem;
+  max-width: 100%;
+}
+
 table.grid.lines th.clip-label,
 table.grid.lines td.clip-label {
   width: auto;

@@ -1,6 +1,6 @@
 import { basename } from 'node:path'
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite'
-import { isoDate, lastDay, monthEntirelyBefore, todayIso } from './dates.ts'
+import { addDays, isoDate, lastDay, monthEntirelyBefore, nearbyTransferDate, todayIso } from './dates.ts'
 import { LedgerError } from './errors.ts'
 import { lineMillis, millisToCents, parseQuantity, parseUserAmount, parseUserMillis } from './money.ts'
 import { classifyImport, operationKey, readTabularFile } from './parse-file.ts'
@@ -138,7 +138,7 @@ export function accountFigures(
   const unpointed = one(
     database,
     `SELECT COALESCE(SUM(amount_cents), 0) AS total
-     FROM operations WHERE account_id = ? AND category_id IS NULL AND date <= ?`,
+     FROM operations WHERE account_id = ? AND category_id IS NULL AND COALESCE(value_date, date) <= ?`,
     [account.id, asOf],
   )
   const unpointedCents = numberValue(unpointed?.total)
@@ -148,7 +148,7 @@ export function accountFigures(
   const moved = one(
     database,
     `SELECT COALESCE(SUM(amount_cents), 0) AS total
-     FROM operations WHERE account_id = ? AND date >= ? AND date <= ?`,
+     FROM operations WHERE account_id = ? AND COALESCE(value_date, date) >= ? AND COALESCE(value_date, date) <= ?`,
     [account.id, account.openingDate, asOf],
   )
   return { currentCents: account.openingCents + numberValue(moved?.total), unpointedCents, securitiesMillis: null }
@@ -197,13 +197,13 @@ function courantMovements(
 ): StatementMovement[] {
   return all(
     database,
-    `SELECT date, label, amount_cents FROM operations
-     WHERE account_id = ? AND date > ? AND date <= ?
-       AND (? IS NULL OR date >= ?)
-     ORDER BY date, id`,
+    `SELECT COALESCE(value_date, date) AS balance_date, label, amount_cents FROM operations
+     WHERE account_id = ? AND COALESCE(value_date, date) > ? AND COALESCE(value_date, date) <= ?
+       AND (? IS NULL OR COALESCE(value_date, date) >= ?)
+     ORDER BY balance_date, id`,
     [account.id, after, until, account.openingDate, account.openingDate],
   ).map((row) => ({
-    date: String(row.date),
+    date: String(row.balance_date),
     label: String(row.label),
     amount: numberValue(row.amount_cents),
   }))
@@ -218,14 +218,14 @@ function savingsMovements(
   const movements = transferMovements(database, account, after, until)
   for (const row of all(
     database,
-    `SELECT date, label, amount_cents FROM operations
-     WHERE account_id = ? AND date > ? AND date <= ?
-       AND (? IS NULL OR date >= ?)
-     ORDER BY date, id`,
+    `SELECT COALESCE(value_date, date) AS balance_date, label, amount_cents FROM operations
+     WHERE account_id = ? AND COALESCE(value_date, date) > ? AND COALESCE(value_date, date) <= ?
+       AND (? IS NULL OR COALESCE(value_date, date) >= ?)
+     ORDER BY balance_date, id`,
     [account.id, after, until, account.openingDate, account.openingDate],
   )) {
     movements.push({
-      date: String(row.date),
+      date: String(row.balance_date),
       label: String(row.label),
       amount: numberValue(row.amount_cents),
     })
@@ -259,11 +259,13 @@ function titreMovements(
   movements.push(...transferMovements(database, account, after, until).filter((row) => transferAddsCash(account, row.date, until)))
   for (const row of all(
     database,
-    'SELECT date, label, amount_cents FROM operations WHERE account_id = ? AND date > ? AND date <= ? ORDER BY date, id',
+    `SELECT COALESCE(value_date, date) AS balance_date, label, amount_cents FROM operations
+     WHERE account_id = ? AND COALESCE(value_date, date) > ? AND COALESCE(value_date, date) <= ?
+     ORDER BY balance_date, id`,
     [account.id, after, until],
   )) {
     movements.push({
-      date: String(row.date),
+      date: String(row.balance_date),
       label: String(row.label),
       amount: numberValue(row.amount_cents),
     })
@@ -331,8 +333,8 @@ function unpointedThrough(database: DatabaseSync, account: Account, asOf: string
   const row = one(
     database,
     `SELECT COUNT(*) AS total FROM operations
-     WHERE account_id = ? AND category_id IS NULL AND date <= ?
-       AND (? IS NULL OR date >= ?)`,
+     WHERE account_id = ? AND category_id IS NULL AND COALESCE(value_date, date) <= ?
+       AND (? IS NULL OR COALESCE(value_date, date) >= ?)`,
     [account.id, asOf, account.openingDate, account.openingDate],
   )
   return numberValue(row?.total)
@@ -608,7 +610,7 @@ export function cancelBatch(database: DatabaseSync, batchId: number): number {
 export function listOperations(database: DatabaseSync, accountId: number, year: number): OperationView[] {
   return all(
     database,
-    `SELECT o.id, o.date, o.label, o.amount_cents, o.category_id, c.name AS category_name,
+    `SELECT o.id, o.date, o.value_date, o.label, o.amount_cents, o.category_id, c.name AS category_name,
             CASE
               WHEN t.id IS NULL THEN NULL
               WHEN t.from_account_id = o.account_id THEN t.to_account_id
@@ -635,7 +637,7 @@ export function listUnpointed(database: DatabaseSync, accountId: number | null):
   const keywords = learnKeywords(database)
   const rows = all(
     database,
-    `SELECT o.id, o.account_id, a.name AS account_name, b.name AS bank_name, o.date, o.label, o.amount_cents
+    `SELECT o.id, o.account_id, a.name AS account_name, b.name AS bank_name, o.date, o.value_date, o.label, o.amount_cents
      FROM operations o
      JOIN accounts a ON a.id = o.account_id
      JOIN banks b ON b.id = a.bank_id
@@ -652,6 +654,7 @@ export function listUnpointed(database: DatabaseSync, accountId: number | null):
       accountName: String(row.account_name),
       bankName: String(row.bank_name),
       date: String(row.date),
+      valueDate: row.value_date === null || row.value_date === undefined ? null : String(row.value_date),
       label: String(row.label),
       amountCents,
       suggestedCategoryId: suggestCategory(keywords, numberValue(row.account_id), String(row.label), amountCents),
@@ -838,6 +841,7 @@ export function updateManualOperation(
   date: string,
   label: string,
   rawAmount: string,
+  rawValueDate = '',
 ): void {
   const operation = manualOperation(database, operationId)
   const precise = operation.kind === 'epargne' || operation.kind === 'titre'
@@ -845,6 +849,11 @@ export function updateManualOperation(
   if (amount === null || amount === 0) throw new LedgerError('Le montant est requis.')
   const nextDate = transferDate(date)
   const name = requiredName(label, 'Le libellé est requis.')
+  const valueDate = rawValueDate.trim() ? statementDate(rawValueDate) : null
+  const openingDate = operation.opening_date === null || operation.opening_date === undefined ? null : String(operation.opening_date)
+  if (valueDate && openingDate && valueDate < openingDate) {
+    throw new LedgerError('Date antérieure au solde d’ouverture.')
+  }
   const linked = one(
     database,
     'SELECT id FROM transfers WHERE source_operation_id = ? OR dest_operation_id = ?',
@@ -853,8 +862,9 @@ export function updateManualOperation(
   if (linked && (nextDate !== String(operation.date) || amount !== numberValue(operation.amount_cents))) {
     throw new LedgerError('Pour changer le montant ou la date, ôte d’abord le pointage.')
   }
-  run(database, 'UPDATE operations SET date = ?, label = ?, amount_cents = ? WHERE id = ?', [
+  run(database, 'UPDATE operations SET date = ?, value_date = ?, label = ?, amount_cents = ? WHERE id = ?', [
     nextDate,
+    valueDate && valueDate !== nextDate ? valueDate : null,
     name,
     amount,
     operationId,
@@ -995,10 +1005,11 @@ export function accountSummary(database: DatabaseSync, accountId: number, year: 
   }
   const operations = all(
     database,
-    'SELECT date, amount_cents, category_id FROM operations WHERE account_id = ?',
+    'SELECT date, amount_cents, category_id, value_date FROM operations WHERE account_id = ?',
     [accountId],
   ).map((row) => ({
     date: String(row.date),
+    balanceDate: row.value_date === null || row.value_date === undefined ? String(row.date) : String(row.value_date),
     amountCents: numberValue(row.amount_cents),
     categoryId: row.category_id === null ? null : numberValue(row.category_id),
   }))
@@ -1217,7 +1228,7 @@ function adoptMatch(database: DatabaseSync, operationId: number, accountId: numb
   if (
     !match ||
     numberValue(match.account_id) !== accountId ||
-    String(match.date) !== date ||
+    !nearbyTransferDate(String(match.date), date) ||
     numberValue(match.amount_cents) !== amountCents
   ) {
     throw new LedgerError('Cette ligne ne correspond pas au virement.')
@@ -1247,10 +1258,12 @@ function matchingLines(
   const account = getAccount(database, accountId)
   if (account.kind !== 'courant') return []
   const keep = sourceOperationId ?? 0
+  const earliest = addDays(date, -3)
+  const latest = addDays(date, 3)
   return all(
     database,
     `SELECT id, date, label, amount_cents FROM operations
-     WHERE account_id = ? AND date = ? AND amount_cents = ?
+     WHERE account_id = ? AND date >= ? AND date <= ? AND amount_cents = ?
        AND id NOT IN (
          SELECT source_operation_id FROM transfers
          WHERE source_operation_id IS NOT NULL AND source_operation_id != ?
@@ -1259,19 +1272,21 @@ function matchingLines(
          WHERE dest_operation_id IS NOT NULL AND (source_operation_id IS NULL OR source_operation_id != ?)
        )
      ORDER BY id`,
-    [accountId, date, amountCents, keep, keep],
-  ).map((row) => ({
-    id: numberValue(row.id),
-    date: String(row.date),
-    label: String(row.label),
-    amountCents: numberValue(row.amount_cents),
-  }))
+    [accountId, earliest, latest, amountCents, keep, keep],
+  )
+    .map((row) => ({
+      id: numberValue(row.id),
+      date: String(row.date),
+      label: String(row.label),
+      amountCents: numberValue(row.amount_cents),
+    }))
+    .filter((row) => nearbyTransferDate(row.date, date))
 }
 
 function manualOperation(database: DatabaseSync, operationId: number): Row {
   const operation = one(
     database,
-    `SELECT o.id, o.date, o.amount_cents, o.batch_id, a.kind
+    `SELECT o.id, o.date, o.amount_cents, o.batch_id, a.kind, a.opening_date
      FROM operations o JOIN accounts a ON a.id = o.account_id WHERE o.id = ?`,
     [operationId],
   )
@@ -1348,7 +1363,7 @@ function titreFigures(
     let outgoing = 0
     let net = 0
     for (const row of movements) {
-      if (row.date <= end) net += row.signed
+      if (row.balanceDate <= end) net += row.signed
       if (row.date >= monthStart && row.date <= end) {
         if (row.signed > 0) incoming += row.signed
         if (row.signed < 0) outgoing += -row.signed
@@ -1359,7 +1374,7 @@ function titreFigures(
       if (row.signed > 0) incoming += row.signed
       if (row.signed < 0) outgoing += -row.signed
     }
-    const started = portfolio !== null || movements.some((row) => row.date <= end)
+    const started = portfolio !== null || movements.some((row) => row.balanceDate <= end)
     balances.push(started ? (portfolio ?? 0) + net : null)
     expense.push(outgoing > 0 ? outgoing : null)
     income.push(incoming > 0 ? incoming : null)
@@ -1370,7 +1385,7 @@ function titreFigures(
 function titreBalanceAsOf(database: DatabaseSync, account: Account, asOf: string): number | null {
   const stored = getAccount(database, account.id)
   const portfolio = portfolioMillis(stored, listPositions(database, account.id), asOf, titreTransferFlows(database, account.id, asOf))
-  const movements = manualFlows(database, account.id, asOf)
+  const movements = manualFlows(database, account.id, asOf).filter((row) => row.balanceDate <= asOf)
   if (portfolio === null && movements.length === 0) return null
   return (portfolio ?? 0) + movements.reduce((sum, row) => sum + row.signed, 0)
 }
@@ -1431,12 +1446,17 @@ function titreTransferFlows(database: DatabaseSync, accountId: number, until: st
   })
 }
 
-function manualFlows(database: DatabaseSync, accountId: number, until: string): { date: string; signed: number }[] {
+function manualFlows(database: DatabaseSync, accountId: number, until: string): CashFlow[] {
   return all(
     database,
-    'SELECT date, amount_cents FROM operations WHERE account_id = ? AND date <= ?',
-    [accountId, until],
-  ).map((row) => ({ date: String(row.date), signed: numberValue(row.amount_cents) }))
+    `SELECT date, COALESCE(value_date, date) AS balance_date, amount_cents
+     FROM operations WHERE account_id = ? AND (date <= ? OR COALESCE(value_date, date) <= ?)`,
+    [accountId, until, until],
+  ).map((row) => ({
+    date: String(row.date),
+    balanceDate: String(row.balance_date),
+    signed: numberValue(row.amount_cents),
+  }))
 }
 
 function savingsFigures(database: DatabaseSync, accountId: number, year: number) {
@@ -1457,7 +1477,7 @@ function savingsFigures(database: DatabaseSync, accountId: number, year: number)
     let net = 0
     if (!closed) {
       for (const row of rows) {
-        if (hasOpening && row.date >= openingDate && row.date <= end) net += row.signed
+        if (hasOpening && row.balanceDate >= openingDate && row.balanceDate <= end) net += row.signed
         if (row.date >= monthStart && row.date <= end && (!hasOpening || row.date >= openingDate)) {
           if (row.signed > 0) incoming += row.signed
           if (row.signed < 0) outgoing += -row.signed
@@ -1481,29 +1501,37 @@ function savingsBalanceAsOf(database: DatabaseSync, accountId: number, asOf: str
   if (account.openingMillis === null || account.openingDate === null || asOf < account.openingDate) return null
   let net = 0
   for (const row of savingsFlows(database, accountId, asOf)) {
-    if (row.date < account.openingDate || row.date > asOf) continue
+    if (row.balanceDate < account.openingDate || row.balanceDate > asOf) continue
     net += row.signed
   }
   return account.openingMillis + net
 }
 
-function savingsFlows(database: DatabaseSync, accountId: number, until: string): { date: string; signed: number }[] {
+function savingsFlows(database: DatabaseSync, accountId: number, until: string): CashFlow[] {
   const flows = savingsTransfers(database, accountId, until).map((row) => {
     const amount = numberValue(row.amount_cents) * 10
     let signed = 0
     if (numberValue(row.to_account_id) === accountId) signed += amount
     if (numberValue(row.from_account_id) === accountId) signed -= amount
-    return { date: String(row.date), signed }
+    const date = String(row.date)
+    return { date, balanceDate: date, signed }
   })
   for (const row of all(
     database,
-    'SELECT date, amount_cents FROM operations WHERE account_id = ? AND date <= ?',
-    [accountId, until],
+    `SELECT date, COALESCE(value_date, date) AS balance_date, amount_cents
+     FROM operations WHERE account_id = ? AND (date <= ? OR COALESCE(value_date, date) <= ?)`,
+    [accountId, until, until],
   )) {
-    flows.push({ date: String(row.date), signed: numberValue(row.amount_cents) })
+    flows.push({
+      date: String(row.date),
+      balanceDate: String(row.balance_date),
+      signed: numberValue(row.amount_cents),
+    })
   }
   return flows
 }
+
+type CashFlow = { date: string; balanceDate: string; signed: number }
 
 function savingsTransfers(database: DatabaseSync, accountId: number, until: string): Row[] {
   return all(
@@ -1747,6 +1775,7 @@ function mapOperation(row: Row): OperationView {
   return {
     id: numberValue(row.id),
     date: String(row.date),
+    valueDate: row.value_date === null || row.value_date === undefined ? null : String(row.value_date),
     label: String(row.label),
     amountCents: numberValue(row.amount_cents),
     categoryId: row.category_id === null ? null : numberValue(row.category_id),

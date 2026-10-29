@@ -169,6 +169,7 @@ export type GlobalSummary = {
 export type OperationView = {
   id: number
   date: string
+  valueDate: string | null
   label: string
   amountCents: number
   categoryId: number | null
@@ -203,6 +204,7 @@ export type UnpointedView = {
   accountName: string
   bankName: string
   date: string
+  valueDate: string | null
   label: string
   amountCents: number
   suggestedCategoryId: number | null

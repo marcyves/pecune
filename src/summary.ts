@@ -15,6 +15,7 @@ import type {
 
 export type OperationFact = {
   date: string
+  balanceDate?: string
   amountCents: number
   categoryId: number | null
 }
@@ -134,7 +135,10 @@ export function statementBalances(
     if (monthEntirelyBefore(year, month, openingDate)) return null
     const end = lastDay(year, month)
     const moved = operations
-      .filter((operation) => operation.date >= openingDate && operation.date <= end)
+      .filter((operation) => {
+        const balanceDate = operation.balanceDate ?? operation.date
+        return balanceDate >= openingDate && balanceDate <= end
+      })
       .reduce((sum, operation) => sum + operation.amountCents, 0)
     return openingCents + moved
   })

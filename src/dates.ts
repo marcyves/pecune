@@ -72,6 +72,31 @@ export function monthEntirelyBefore(year: number, month: number, openingDate: st
   return lastDay(year, month) < openingDate
 }
 
+export function addDays(iso: string, days: number): string {
+  const [year, month, day] = iso.split('-').map(Number)
+  const date = new Date(Date.UTC(year, month - 1, day + days))
+  return isoDate(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate()) as string
+}
+
+export function nextBusinessDay(iso: string): string {
+  let cursor = addDays(iso, 1)
+  while (isWeekend(cursor)) cursor = addDays(cursor, 1)
+  return cursor
+}
+
+export function nearbyTransferDate(left: string, right: string): boolean {
+  if (left === right) return true
+  const earlier = left < right ? left : right
+  const later = left < right ? right : left
+  return later === nextBusinessDay(earlier)
+}
+
+function isWeekend(iso: string): boolean {
+  const [year, month, day] = iso.split('-').map(Number)
+  const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay()
+  return weekday === 0 || weekday === 6
+}
+
 function pad(value: number): string {
   return String(value).padStart(2, '0')
 }
