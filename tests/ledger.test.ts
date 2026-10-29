@@ -16,6 +16,7 @@ import {
   createAccount,
   createCategory,
   createFamily,
+  createOperation,
   createSavingsMovement,
   createSavingsTransfer,
   deleteManualOperation,
@@ -36,6 +37,9 @@ import {
   savePosition,
   setCash,
   setMonthlyBalance,
+  statementAt,
+  validateStatement,
+  clearStatement,
   unpointOperation,
   updateAccount,
   updateCategory,
@@ -117,7 +121,7 @@ describe('base', () => {
     const database = openDatabase(path)
     databases.push(database)
     const version = database.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as { value: string }
-    expect(version.value).toBe('11')
+    expect(version.value).toBe('12')
     const legacy = listAccounts(database).find((account) => account.bankName === 'Banque Postale')
     expect(legacy?.kind).toBe('epargne')
     expect(legacy?.cashMillis).toBeNull()
@@ -1080,6 +1084,28 @@ describe('règles du classeur', () => {
     expect(listOperations(database, joint.id, 2026).find((row) => row.id === received!.id)?.categoryName).toBe('Virement reçu')
   })
 
+  it('ajoute une ligne de relevé à la main, même si elle ressemble à une autre', () => {
+    const { database } = tempDatabase()
+    const account = createAccount(database, {
+      name: 'CCP',
+      bankName: 'Banque Postale',
+      kind: 'courant',
+      mapping: signed,
+      openingCents: 10000,
+      openingDate: '2026-01-01',
+    })
+    createOperation(database, account.id, '2026-03-10', 'LOYER', '-40,00')
+    createOperation(database, account.id, '2026-03-10', 'LOYER', '-40,00')
+    const rows = listOperations(database, account.id, 2026)
+    expect(rows.map((row) => row.amountCents)).toEqual([-4000, -4000])
+    expect(rows.every((row) => row.imported === false && row.categoryId === null)).toBe(true)
+    expect(accountFigures(database, account, '2026-03-31').currentCents).toBe(2000)
+    expect(() => createOperation(database, account.id, '2025-12-01', 'LOYER', '-40,00')).toThrow(/ouverture/)
+    expect(() => createOperation(database, account.id, '', 'LOYER', '-40,00')).toThrow(/date du relevé/)
+    const livret = createAccount(database, { name: 'Livret A', bankName: 'Banque Postale', kind: 'epargne' })
+    expect(() => createOperation(database, livret.id, '2026-03-10', 'LOYER', '-40,00')).toThrow(/compte courant/)
+  })
+
   it('corrige ou efface une ligne importée', async () => {
     const { database, dir } = tempDatabase()
     const account = createAccount(database, {
@@ -1097,6 +1123,65 @@ describe('règles du classeur', () => {
     expect(listOperations(database, account.id, 2026)[0].label).toBe('Virement corrigé')
     deleteManualOperation(database, imported.id)
     expect(listOperations(database, account.id, 2026)).toEqual([])
+  })
+
+  it('valide le solde d’un relevé et signale s’il change', async () => {
+    const { database, dir } = tempDatabase()
+    const account = createAccount(database, {
+      name: 'CCP',
+      bankName: 'Banque Postale',
+      kind: 'courant',
+      mapping: signed,
+      openingCents: 10000,
+      openingDate: '2026-01-01',
+    })
+    await confirmImport(database, account.id, csv(dir, 'releve.csv', 'Date;Libelle;Montant\n10/03/2026;LOYER;-40,00\n'))
+    expect(statementAt(database, account.id, '2026-03-31')).toEqual({
+      date: '2026-03-31',
+      cents: 6000,
+      unpointedCount: 1,
+      unit: 'cents',
+      movements: [],
+    })
+    expect(() => statementAt(database, account.id, '')).toThrow(/date du relevé/)
+    expect(() => validateStatement(database, account.id, '2025-12-31')).toThrow(/Pas de solde/)
+    const validated = validateStatement(database, account.id, '2026-03-31')
+    expect(validated.reconciledOn).toBe('2026-03-31')
+    expect(validated.reconciledCents).toBe(6000)
+    await confirmImport(database, account.id, csv(dir, 'suite.csv', 'Date;Libelle;Montant\n20/03/2026;EDF;-10,00\n02/04/2026;EAU;-5,00\n'))
+    const drifted = statementAt(database, account.id, '2026-03-31')
+    expect(drifted.cents).toBe(5000)
+    expect(drifted.movements).toEqual([])
+    const april = statementAt(database, account.id, '2026-04-30')
+    expect(april.cents).toBe(4500)
+    expect(april.movements).toEqual([{ date: '2026-04-02', label: 'EAU', amount: -500 }])
+    const cleared = clearStatement(database, account.id)
+    expect(cleared.reconciledOn).toBeNull()
+    expect(cleared.reconciledCents).toBeNull()
+  })
+
+  it('liste les virements entre deux relevés d’épargne', () => {
+    const { database } = tempDatabase()
+    const livret = createAccount(database, {
+      name: 'Livret A',
+      bankName: 'Banque Postale',
+      kind: 'epargne',
+      openingMillis: 1000000,
+      openingDate: '2026-01-01',
+    })
+    const courant = createAccount(database, {
+      name: 'CCP',
+      bankName: 'Banque Postale',
+      kind: 'courant',
+      openingCents: 0,
+      openingDate: '2026-01-01',
+    })
+    validateStatement(database, livret.id, '2026-01-31')
+    createSavingsTransfer(database, livret.id, courant.id, '2026-02-10', '40,00')
+    const check = statementAt(database, livret.id, '2026-02-28')
+    expect(check.unit).toBe('millis')
+    expect(check.cents).toBe(96000)
+    expect(check.movements).toEqual([{ date: '2026-02-10', label: 'Virement vers CCP', amount: -40000 }])
   })
 })
 

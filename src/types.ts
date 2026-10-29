@@ -26,6 +26,22 @@ export type Account = {
   openingDate: string | null
   cashMillis: number | null
   cashValuedOn: string | null
+  reconciledOn: string | null
+  reconciledCents: number | null
+}
+
+export type StatementMovement = {
+  date: string
+  label: string
+  amount: number
+}
+
+export type StatementCheck = {
+  date: string
+  cents: number | null
+  unpointedCount: number
+  unit: 'cents' | 'millis'
+  movements: StatementMovement[]
 }
 
 export type Category = {

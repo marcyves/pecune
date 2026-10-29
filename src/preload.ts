@@ -24,6 +24,9 @@ const comptes = {
   moveAccount: (id: number, direction: -1 | 1) => call<unknown>('moveAccount', id, direction),
   setMonthlyBalance: (accountId: number, month: string, raw: string) =>
     call<unknown>('setMonthlyBalance', accountId, month, raw),
+  statementAt: (accountId: number, date: string) => call<unknown>('statementAt', accountId, date),
+  validateStatement: (accountId: number, date: string) => call<unknown>('validateStatement', accountId, date),
+  clearStatement: (accountId: number) => call<unknown>('clearStatement', accountId),
   savePosition: (input: unknown) => call<unknown>('savePosition', input),
   deletePosition: (id: number) => call<unknown>('deletePosition', id),
   setCash: (accountId: number, raw: string, valuedOn: string) => call<unknown>('setCash', accountId, raw, valuedOn),
@@ -40,6 +43,8 @@ const comptes = {
     call<unknown>('previewSavingsTransfer', toAccountId, date, amount),
   pointOperation: (operationId: number, categoryId: number, counterpartyAccountId: number | null, matchedOperationId: number | null) =>
     call<unknown>('pointOperation', operationId, categoryId, counterpartyAccountId, matchedOperationId),
+  createOperation: (accountId: number, date: string, label: string, amount: string) =>
+    call<unknown>('createOperation', accountId, date, label, amount),
   createSavingsMovement: (accountId: number, date: string, label: string, amount: string, direction: 'entree' | 'sortie') =>
     call<unknown>('createSavingsMovement', accountId, date, label, amount, direction),
   createTransfer: (fromAccountId: number, toAccountId: number, date: string, amount: string, matchedOperationId: number | null) =>

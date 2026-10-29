@@ -23,6 +23,7 @@ import {
   listAccounts,
   listBatches,
   listFamilies,
+  createOperation,
   createSavingsMovement,
   createSavingsTransfer,
   deleteManualOperation,
@@ -40,6 +41,9 @@ import {
   savePosition,
   setCash,
   setMonthlyBalance,
+  clearStatement,
+  statementAt,
+  validateStatement,
   unpointOperation,
   updateAccount,
   updateCategory,
@@ -148,12 +152,14 @@ function workspace(year: number) {
 
 function accountDetail(id: number, year: number) {
   const db = requireDatabase()
+  const account = listAccounts(db).find((item) => item.id === id) ?? null
   return {
-    account: listAccounts(db).find((account) => account.id === id) ?? null,
+    account,
     summary: accountSummary(db, id, year),
     operations: listOperations(db, id, year),
     batches: listBatches(db, id),
     transfers: listTransfers(db, id, year),
+    statement: account?.reconciledOn ? statementAt(db, id, account.reconciledOn) : null,
   }
 }
 
@@ -274,6 +280,11 @@ function register(): void {
   handle('setMonthlyBalance', (accountId, month, raw) => {
     setMonthlyBalance(requireDatabase(), Number(accountId), String(month), centsFromInput(String(raw)))
   })
+  handle('statementAt', (accountId, date) => statementAt(requireDatabase(), Number(accountId), String(date ?? '')))
+  handle('validateStatement', (accountId, date) =>
+    validateStatement(requireDatabase(), Number(accountId), String(date ?? '')),
+  )
+  handle('clearStatement', (accountId) => clearStatement(requireDatabase(), Number(accountId)))
   handle('savePosition', (input) => {
     const value = input as {
       accountId: number
@@ -333,6 +344,9 @@ function register(): void {
         ? null
         : Number(matchedOperationId),
     ),
+  )
+  handle('createOperation', (accountId, date, label, amount) =>
+    createOperation(requireDatabase(), Number(accountId), String(date ?? ''), String(label ?? ''), String(amount ?? '')),
   )
   handle('createSavingsMovement', (accountId, date, label, amount, direction) => {
     if (direction !== 'entree' && direction !== 'sortie') throw new LedgerError('Choisis une entrée ou une sortie.')

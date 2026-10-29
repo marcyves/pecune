@@ -259,6 +259,32 @@ table.grid td.account-name {
 .section-head h2 { margin: 0; }
 
 .account-balances h2.balance-next { margin-top: 1.15rem; }
+
+.statement-status { margin: 0 0 0.8rem; }
+
+.statement-figures {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.8rem 1.2rem;
+  margin: 0.8rem 0;
+}
+
+.statement-figures div { display: grid; gap: 0.1rem; }
+
+.statement-figures .figure {
+  font-variant-numeric: tabular-nums;
+  font-size: 1.35rem;
+}
+
+.statement-moves { margin-top: 0.8rem; }
+
+.statement-moves h3 {
+  font-size: 1rem;
+  margin: 0 0 0.6rem;
+}
+
+.manual-operation { margin-bottom: 1rem; }
 h2 { font-size: 1.25rem; }
 
 .app {
@@ -531,15 +557,8 @@ table.grid tr.bank-gap td:first-child {
   table-layout: fixed;
 }
 
-.pointing table.grid th:first-child,
-.pointing table.grid td:first-child {
-  min-width: 0;
-  width: 6.2rem;
-}
-
 .pointing th.account,
 .pointing td.account {
-  width: 18%;
   white-space: normal;
   overflow-wrap: anywhere;
 }
@@ -551,10 +570,67 @@ table.grid tr.bank-gap td:first-child {
   background: #fffdf8;
 }
 
-.pointing th.label,
-.pointing td.label {
-  width: 34%;
+table.grid.lines {
+  width: 100%;
+  min-width: 0;
+  table-layout: fixed;
+}
+
+table.grid.lines th:first-child,
+table.grid.lines td:first-child {
+  position: static;
+  left: auto;
+  min-width: 0;
+  width: auto;
+  max-width: none;
+}
+
+table.grid.lines th.when,
+table.grid.lines td.when,
+table.grid.lines th.num,
+table.grid.lines td.num {
+  width: calc(12ch + 1.1rem);
+  max-width: calc(12ch + 1.1rem);
+}
+
+table.grid.lines th.clip-label,
+table.grid.lines td.clip-label {
+  width: auto;
+  max-width: none;
   white-space: normal;
+}
+
+table.grid.lines th.point,
+table.grid.lines td.point {
+  width: 15rem;
+  max-width: 15rem;
+}
+
+table.grid.lines th.account,
+table.grid.lines td.account {
+  width: 11rem;
+  max-width: 11rem;
+}
+
+table.grid.lines th.actions,
+table.grid.lines td.actions {
+  width: 12rem;
+  max-width: 12rem;
+}
+
+table.grid.lines th.note,
+table.grid.lines td.note {
+  width: 9rem;
+  max-width: 9rem;
+  white-space: normal;
+}
+
+table.grid.lines td input.amount,
+table.grid.lines td input.valued-on,
+table.grid.lines textarea.label-field {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 
 td.actions {
@@ -604,11 +680,49 @@ button.icon {
   place-items: center;
 }
 
-.pointing .label-text {
+.label-text {
+  max-width: 100%;
   max-height: 4.5rem;
   overflow: auto;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+textarea.label-field {
+  font: inherit;
+  color: inherit;
+  border: 1px solid #d9cebf;
+  background: white;
+  border-radius: 6px;
+  padding: 0.4rem 0.5rem;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  height: 2.8rem;
+  resize: none;
+  overflow: auto;
+}
+
+.form-row.entry {
+  display: grid;
+  grid-template-columns: calc(12ch + 1.8rem) minmax(0, 1fr) calc(12ch + 1.8rem);
+  align-items: end;
+}
+
+.form-row.entry.way {
+  grid-template-columns: calc(12ch + 1.8rem) minmax(0, 1fr) calc(12ch + 1.8rem) 8.5rem;
+}
+
+.form-row.entry.point-add {
+  grid-template-columns: 14rem calc(12ch + 1.8rem) minmax(0, 1fr) calc(12ch + 1.8rem);
+}
+
+.form-row.entry input,
+.form-row.entry select,
+.form-row.entry textarea.label-field {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
 }
 
 td.indent button.link,
@@ -665,18 +779,6 @@ td.num button.amount {
 }
 
 .drill table.grid { width: 100%; min-width: 0; }
-
-.drill td.label {
-  white-space: normal;
-  width: 60%;
-}
-
-.drill .label-text {
-  max-height: 4.5rem;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
 
 .empty { color: #6d645b; }
 

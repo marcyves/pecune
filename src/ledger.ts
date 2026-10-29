@@ -19,6 +19,8 @@ import type {
   OperationView,
   Position,
   Preview,
+  StatementCheck,
+  StatementMovement,
   TransferMatch,
   TransferView,
   UnpointedView,
@@ -150,6 +152,190 @@ export function accountFigures(
     [account.id, account.openingDate, asOf],
   )
   return { currentCents: account.openingCents + numberValue(moved?.total), unpointedCents, securitiesMillis: null }
+}
+
+export function statementAt(database: DatabaseSync, accountId: number, rawDate: string): StatementCheck {
+  const date = statementDate(rawDate)
+  const account = getAccount(database, accountId)
+  const figures = accountFigures(database, account, date)
+  const reconciledOn = account.reconciledOn
+  const movements =
+    reconciledOn !== null &&
+    account.reconciledCents !== null &&
+    figures.currentCents !== null &&
+    figures.currentCents !== account.reconciledCents
+      ? movementsBetween(database, account, reconciledOn, date)
+      : []
+  return {
+    date,
+    cents: figures.currentCents,
+    unpointedCount: unpointedThrough(database, account, date),
+    unit: account.kind === 'courant' ? 'cents' : 'millis',
+    movements,
+  }
+}
+
+function movementsBetween(
+  database: DatabaseSync,
+  account: Account,
+  fromDate: string,
+  toDate: string,
+): StatementMovement[] {
+  if (fromDate === toDate) return []
+  const after = fromDate < toDate ? fromDate : toDate
+  const until = fromDate < toDate ? toDate : fromDate
+  if (account.kind === 'courant') return courantMovements(database, account, after, until)
+  if (account.kind === 'epargne') return savingsMovements(database, account, after, until)
+  return titreMovements(database, account, after, until)
+}
+
+function courantMovements(
+  database: DatabaseSync,
+  account: Account,
+  after: string,
+  until: string,
+): StatementMovement[] {
+  return all(
+    database,
+    `SELECT date, label, amount_cents FROM operations
+     WHERE account_id = ? AND date > ? AND date <= ?
+       AND (? IS NULL OR date >= ?)
+     ORDER BY date, id`,
+    [account.id, after, until, account.openingDate, account.openingDate],
+  ).map((row) => ({
+    date: String(row.date),
+    label: String(row.label),
+    amount: numberValue(row.amount_cents),
+  }))
+}
+
+function savingsMovements(
+  database: DatabaseSync,
+  account: Account,
+  after: string,
+  until: string,
+): StatementMovement[] {
+  const movements = transferMovements(database, account, after, until)
+  for (const row of all(
+    database,
+    `SELECT date, label, amount_cents FROM operations
+     WHERE account_id = ? AND date > ? AND date <= ?
+       AND (? IS NULL OR date >= ?)
+     ORDER BY date, id`,
+    [account.id, after, until, account.openingDate, account.openingDate],
+  )) {
+    movements.push({
+      date: String(row.date),
+      label: String(row.label),
+      amount: numberValue(row.amount_cents),
+    })
+  }
+  return movements.sort(byMovement)
+}
+
+function titreMovements(
+  database: DatabaseSync,
+  account: Account,
+  after: string,
+  until: string,
+): StatementMovement[] {
+  const movements: StatementMovement[] = []
+  for (const position of listPositions(database, account.id)) {
+    if (!position.valuedOn || position.valuedOn <= after || position.valuedOn > until) continue
+    movements.push({
+      date: position.valuedOn,
+      label: position.name,
+      amount: lineMillis(position.quantityMicros, position.valueMillis),
+    })
+  }
+  if (
+    account.cashValuedOn &&
+    account.cashMillis &&
+    account.cashValuedOn > after &&
+    account.cashValuedOn <= until
+  ) {
+    movements.push({ date: account.cashValuedOn, label: 'Espèces', amount: account.cashMillis })
+  }
+  movements.push(...transferMovements(database, account, after, until).filter((row) => transferAddsCash(account, row.date, until)))
+  for (const row of all(
+    database,
+    'SELECT date, label, amount_cents FROM operations WHERE account_id = ? AND date > ? AND date <= ? ORDER BY date, id',
+    [account.id, after, until],
+  )) {
+    movements.push({
+      date: String(row.date),
+      label: String(row.label),
+      amount: numberValue(row.amount_cents),
+    })
+  }
+  return movements.sort(byMovement)
+}
+
+function transferMovements(
+  database: DatabaseSync,
+  account: Account,
+  after: string,
+  until: string,
+): StatementMovement[] {
+  return all(
+    database,
+    `SELECT t.date, t.amount_cents, t.from_account_id, fa.name AS from_name, ta.name AS to_name
+     FROM transfers t
+     JOIN accounts fa ON fa.id = t.from_account_id
+     JOIN accounts ta ON ta.id = t.to_account_id
+     WHERE (t.from_account_id = ? OR t.to_account_id = ?)
+       AND t.date > ? AND t.date <= ?
+       AND (? IS NULL OR t.date >= ?)
+     ORDER BY t.date, t.id`,
+    [account.id, account.id, after, until, account.openingDate, account.openingDate],
+  ).map((row) => {
+    const millis = numberValue(row.amount_cents) * 10
+    const outgoing = numberValue(row.from_account_id) === account.id
+    return {
+      date: String(row.date),
+      label: outgoing ? `Virement vers ${String(row.to_name)}` : `Virement de ${String(row.from_name)}`,
+      amount: outgoing ? -millis : millis,
+    }
+  })
+}
+
+function byMovement(left: StatementMovement, right: StatementMovement): number {
+  return left.date.localeCompare(right.date) || left.label.localeCompare(right.label, 'fr') || left.amount - right.amount
+}
+
+export function validateStatement(database: DatabaseSync, accountId: number, rawDate: string): Account {
+  const check = statementAt(database, accountId, rawDate)
+  if (check.cents === null) throw new LedgerError('Pas de solde à cette date.')
+  run(database, 'UPDATE accounts SET reconciled_on = ?, reconciled_cents = ? WHERE id = ?', [
+    check.date,
+    check.cents,
+    accountId,
+  ])
+  return getAccount(database, accountId)
+}
+
+export function clearStatement(database: DatabaseSync, accountId: number): Account {
+  getAccount(database, accountId)
+  run(database, 'UPDATE accounts SET reconciled_on = NULL, reconciled_cents = NULL WHERE id = ?', [accountId])
+  return getAccount(database, accountId)
+}
+
+function statementDate(value: string): string {
+  const text = value.trim()
+  if (!text) throw new LedgerError('Choisis la date du relevé.')
+  return transferDate(text)
+}
+
+function unpointedThrough(database: DatabaseSync, account: Account, asOf: string): number {
+  if (account.kind !== 'courant') return 0
+  const row = one(
+    database,
+    `SELECT COUNT(*) AS total FROM operations
+     WHERE account_id = ? AND category_id IS NULL AND date <= ?
+       AND (? IS NULL OR date >= ?)`,
+    [account.id, asOf, account.openingDate, account.openingDate],
+  )
+  return numberValue(row?.total)
 }
 
 export function getAccount(database: DatabaseSync, id: number): Account {
@@ -557,6 +743,29 @@ export function pointOperation(
       operationId,
     ])
   })
+}
+
+export function createOperation(
+  database: DatabaseSync,
+  accountId: number,
+  date: string,
+  label: string,
+  rawAmount: string,
+): void {
+  const account = getAccount(database, accountId)
+  if (account.kind !== 'courant') throw new LedgerError('Ce compte n’est pas un compte courant.')
+  const nextDate = statementDate(date)
+  if (account.openingDate && nextDate < account.openingDate) {
+    throw new LedgerError('Date antérieure au solde d’ouverture.')
+  }
+  const amount = centsFromInput(rawAmount)
+  if (amount === null || amount === 0) throw new LedgerError('Le montant est requis.')
+  const name = requiredName(label, 'Le libellé est requis.')
+  insert(
+    database,
+    'INSERT INTO operations (account_id, batch_id, date, label, amount_cents) VALUES (?, NULL, ?, ?, ?)',
+    [accountId, nextDate, name, amount],
+  )
 }
 
 export function createSavingsMovement(
@@ -1465,7 +1674,8 @@ function isDateFormat(value: string): value is DateFormat {
 
 function accountSelect(): string {
   return `SELECT a.id, a.name, a.bank_id, b.name AS bank_name, a.kind, a.archived,
-            a.mapping_json, a.opening_cents, a.opening_millis, a.opening_date, a.cash_millis, a.cash_valued_on
+            a.mapping_json, a.opening_cents, a.opening_millis, a.opening_date, a.cash_millis, a.cash_valued_on,
+            a.reconciled_on, a.reconciled_cents
      FROM accounts a JOIN banks b ON b.id = a.bank_id`
 }
 
@@ -1505,6 +1715,9 @@ function mapAccount(row: Row): Account {
     openingDate: row.opening_date === null ? null : String(row.opening_date),
     cashMillis: row.cash_millis === null ? null : numberValue(row.cash_millis),
     cashValuedOn: row.cash_valued_on === null ? null : String(row.cash_valued_on),
+    reconciledOn: row.reconciled_on === null || row.reconciled_on === undefined ? null : String(row.reconciled_on),
+    reconciledCents:
+      row.reconciled_cents === null || row.reconciled_cents === undefined ? null : numberValue(row.reconciled_cents),
   }
 }
 

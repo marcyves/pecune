@@ -15,6 +15,7 @@ import type {
   OperationView,
   Position,
   Preview,
+  StatementCheck,
   StatementSummary,
   TransferMatch,
   TransferView,
@@ -46,6 +47,7 @@ type Detail = {
   operations: OperationView[]
   batches: BatchView[]
   transfers: TransferView[]
+  statement: StatementCheck | null
 }
 
 type Screen = 'global' | 'accounts' | 'account' | 'pointing' | 'categories'
@@ -68,6 +70,9 @@ type ComptesApi = {
   moveCategory: (id: number, direction: -1 | 1) => Promise<Result<unknown>>
   moveAccount: (id: number, direction: -1 | 1) => Promise<Result<unknown>>
   setMonthlyBalance: (accountId: number, month: string, raw: string) => Promise<Result<unknown>>
+  statementAt: (accountId: number, date: string) => Promise<Result<StatementCheck>>
+  validateStatement: (accountId: number, date: string) => Promise<Result<Account>>
+  clearStatement: (accountId: number) => Promise<Result<Account>>
   savePosition: (input: {
     accountId: number
     id?: number
@@ -91,6 +96,7 @@ type ComptesApi = {
     counterpartyAccountId: number | null,
     matchedOperationId: number | null,
   ) => Promise<Result<unknown>>
+  createOperation: (accountId: number, date: string, label: string, amount: string) => Promise<Result<unknown>>
   createSavingsMovement: (
     accountId: number,
     date: string,
@@ -131,13 +137,14 @@ let detail: Detail | null = null
 let unpointed: UnpointedView[] = []
 let pointFilter: number | null = null
 let editingOperationId: number | null = null
-let operationsEdit = false
 let globalView: 'balance' | 'expense' | 'income' = 'balance'
 let globalOrder = false
 let accountTab: 'depense' | 'encaissement' | 'operations' = 'depense'
 let movingCategoryId: number | null = null
 let categoriesEdit = false
 let notice = ''
+let statementDate = ''
+let statementLook: StatementCheck | null = null
 let importFile: string | null = null
 let importSheet = ''
 let preview: Preview | null = null
@@ -599,6 +606,7 @@ function renderAccount(): HTMLElement {
   }
   page.append(tools)
   page.append(accountHeadingFigures(account, detail.summary))
+  page.append(statementCard(account, detail.statement))
   if (account.kind === 'courant') {
     page.append(renderBatches(detail.batches, account))
     if (preview && importFile) page.append(renderPreview(account.id))
@@ -638,6 +646,166 @@ function accountHeadingFigures(account: Account, summary: AccountSummary): HTMLE
   card.append(monthTable('Solde', values, 'total'))
   box.append(card)
   return box
+}
+
+function statementCard(account: Account, statement: StatementCheck | null): HTMLElement {
+  const card = el('section', 'card')
+  card.append(el('h2', '', 'Relevé'))
+  card.append(
+    el(
+      'p',
+      'muted',
+      'Choisis la date du relevé papier. Le solde calculé s’affiche, puis tu valides s’il correspond.',
+    ),
+  )
+  if (account.reconciledOn && account.reconciledCents !== null) {
+    if (statement && statement.cents === account.reconciledCents) {
+      card.append(
+        el(
+          'p',
+          'statement-status',
+          `Validé le ${formatIsoDate(account.reconciledOn)} : ${formatEuros(account.reconciledCents)}.`,
+        ),
+      )
+    } else if (statement && statement.cents !== null) {
+      card.append(
+        el(
+          'div',
+          'banner',
+          `Le solde au ${formatIsoDate(account.reconciledOn)} ne correspond plus au relevé validé. Il était ${formatEuros(account.reconciledCents)}, il est maintenant ${formatEuros(statement.cents)}.`,
+        ),
+      )
+    } else {
+      card.append(
+        el(
+          'div',
+          'banner',
+          `Le solde au ${formatIsoDate(account.reconciledOn)} n’est plus calculable. Le relevé validé indiquait ${formatEuros(account.reconciledCents)}.`,
+        ),
+      )
+    }
+  }
+  const date = dateInput(statementDate || account.reconciledOn || '')
+  date.addEventListener('change', () => {
+    statementDate = date.value
+    statementLook = null
+    render()
+  })
+  const row = el('div', 'form-row')
+  row.append(
+    labeled('Date du relevé', date),
+    button('Afficher le solde', '', () => {
+      void showStatement(account.id, date.value)
+    }),
+  )
+  if (account.reconciledOn) {
+    row.append(button('Retirer la validation', '', () => { void dropStatement(account.id) }))
+  }
+  card.append(row)
+  if (statementLook) card.append(statementResult(account, statementLook))
+  return card
+}
+
+function statementResult(account: Account, look: StatementCheck): HTMLElement {
+  const box = el('div')
+  if (look.cents === null) {
+    box.append(el('p', '', 'Pas de solde à cette date.'))
+    return box
+  }
+  const figures = el('div', 'statement-figures')
+  figures.append(figure(`Solde au ${formatIsoDate(look.date)}`, look.cents))
+  figures.append(
+    button('Valider le relevé', 'primary', () => {
+      void keepStatement(account.id, look.date)
+    }),
+  )
+  box.append(figures)
+  if (look.unpointedCount === 1) {
+    box.append(el('p', 'muted', '1 opération jusqu’à cette date n’est pas pointée.'))
+  } else if (look.unpointedCount > 1) {
+    box.append(el('p', 'muted', `${look.unpointedCount} opérations jusqu’à cette date ne sont pas pointées.`))
+  }
+  if (account.reconciledOn && account.reconciledCents !== null && look.cents !== account.reconciledCents) {
+    box.append(movementBlock(look, account.reconciledOn, account.reconciledCents))
+  }
+  return box
+}
+
+function movementBlock(look: StatementCheck, reconciledOn: string, reconciledCents: number): HTMLElement {
+  const block = el('div', 'statement-moves')
+  const earlier = reconciledOn < look.date ? reconciledOn : look.date
+  const later = reconciledOn < look.date ? look.date : reconciledOn
+  block.append(el('h3', '', `Mouvements entre le ${formatIsoDate(earlier)} et le ${formatIsoDate(later)}`))
+  const gap = look.cents === null ? 0 : look.cents - reconciledCents
+  if (look.movements.length === 0) {
+    block.append(
+      el(
+        'p',
+        'muted',
+        earlier === later
+          ? 'Aucun mouvement entre ces deux dates. L’écart vient de lignes datées de ce jour ou avant.'
+          : `Aucun mouvement entre ces deux dates. L’écart de ${formatEuros(gap)} vient de lignes datées du ${formatIsoDate(earlier)} ou avant.`,
+      ),
+    )
+    return block
+  }
+  const table = lineTable('Date', 'Libellé', 'Montant')
+  for (const movement of look.movements) {
+    const row = el('tr')
+    row.append(dateCell(formatIsoDate(movement.date)), labelText(movement.label), movementAmount(look.unit, movement.amount))
+    table.append(row)
+  }
+  block.append(wrap(table))
+  const sum = look.movements.reduce((total, movement) => total + movement.amount, 0)
+  const format = look.unit === 'millis' ? formatMillis : formatEuros
+  const forward = look.date >= reconciledOn
+  const effect = forward ? sum : -sum
+  const effectCents = look.unit === 'millis' ? millisToCents(effect) : effect
+  if (effectCents === gap) {
+    block.append(el('p', 'muted', `Ces mouvements expliquent l’écart de ${formatEuros(gap)}.`))
+  } else {
+    block.append(
+      el(
+        'p',
+        'muted',
+        `Ces mouvements font ${format(sum)}. L’écart entre les deux soldes est ${formatEuros(gap)}.`,
+      ),
+    )
+  }
+  return block
+}
+
+function movementAmount(unit: StatementCheck['unit'], amount: number): HTMLElement {
+  return unit === 'millis' ? millisCell(amount) : moneyCell(amount)
+}
+
+async function showStatement(accountId: number, date: string): Promise<void> {
+  statementDate = date
+  statementLook = await ask(window.comptes.statementAt(accountId, date))
+  render()
+}
+
+async function keepStatement(accountId: number, date: string): Promise<void> {
+  const saved = await ask(window.comptes.validateStatement(accountId, date))
+  if (!saved) {
+    render()
+    return
+  }
+  statementDate = date
+  statementLook = null
+  await loadDetail()
+  render()
+}
+
+async function dropStatement(accountId: number): Promise<void> {
+  const saved = await ask(window.comptes.clearStatement(accountId))
+  if (!saved) {
+    render()
+    return
+  }
+  statementLook = null
+  await loadDetail()
+  render()
 }
 
 function openingBlock(account: Account, summary: AccountSummary): HTMLElement {
@@ -1088,15 +1256,10 @@ function drillPanel(): HTMLElement {
     return sum + operation.amountCents
   }, 0)
   panel.append(el('p', 'muted', `${operations.length} ${operations.length > 1 ? 'opérations' : 'opération'} · ${formatEuros(total)}`))
-  const table = el('table', 'grid')
-  const columns = el('tr')
-  for (const label of ['Date', 'Libellé', 'Montant']) columns.append(el('th', label === 'Montant' ? 'num' : '', label))
-  table.append(columns)
+  const table = lineTable('Date', 'Libellé', 'Montant')
   for (const operation of operations) {
     const row = el('tr')
-    const labelCell = el('td', 'label')
-    labelCell.append(el('div', 'label-text', operation.label))
-    row.append(el('td', '', formatIsoDate(operation.date)), labelCell, moneyCell(operation.amountCents))
+    row.append(dateCell(formatIsoDate(operation.date)), labelText(operation.label), moneyCell(operation.amountCents))
     table.append(row)
   }
   panel.append(wrap(table))
@@ -1154,13 +1317,12 @@ function movementEditor(account: Account): HTMLElement {
     ),
   )
   const date = dateInput(todayIso())
-  const label = textInput('')
-  label.placeholder = 'Libellé'
+  const label = labelField('')
   const amount = amountInput('')
   amount.placeholder = '0,000'
   const direction = el('select') as HTMLSelectElement
   direction.append(option('entree', 'Entrée'), option('sortie', 'Sortie'))
-  const form = el('div', 'form-row')
+  const form = el('div', 'form-row entry way')
   form.append(labeled('Date', date), labeled('Libellé', label), labeled('Montant', amount), labeled('Sens', direction))
   card.append(form)
   card.append(
@@ -1194,21 +1356,10 @@ async function addMovement(
 }
 
 function movementTable(operations: OperationView[]): HTMLElement {
-  const table = el('table', 'grid')
-  const head = el('tr')
-  for (const label of ['Date', 'Libellé', 'Montant', '']) head.append(el('th', label === 'Montant' ? 'num' : '', label))
-  table.append(head)
+  const table = lineTable('Date', 'Libellé', 'Montant')
   for (const operation of operations) {
     const row = el('tr')
-    if (editingOperationId === operation.id) {
-      const date = dateInput(operation.date)
-      const label = textInput(operation.label)
-      const amount = amountInput(formatInputMillis(operation.amountCents))
-      row.append(cell(date), cell(label), cell(amount), operationActions(operation, { date, label, amount }))
-    } else {
-      row.append(el('td', '', formatIsoDate(operation.date)), el('td', '', operation.label), millisCell(operation.amountCents))
-      row.append(operationActions(operation))
-    }
+    row.append(dateCell(formatIsoDate(operation.date)), labelText(operation.label), millisCell(operation.amountCents))
     table.append(row)
   }
   return wrap(table)
@@ -1356,47 +1507,26 @@ function renderBatches(batches: BatchView[], account: Account): HTMLElement {
 function renderOperations(operations: OperationView[], accountId: number): HTMLElement {
   const card = el('section', 'card')
   const head = el('div', 'section-head')
-  const edit = glyphButton('Modifier les opérations', 'edit', () => {
-    operationsEdit = !operationsEdit
-    if (!operationsEdit) editingOperationId = null
-    render()
-  })
-  if (operationsEdit) edit.classList.add('active')
-  edit.setAttribute('aria-pressed', String(operationsEdit))
-  head.append(el('h2', '', `Opérations ${year}`), edit)
+  head.append(el('h2', '', `Opérations ${year}`))
   card.append(head)
   if (operations.length === 0) card.append(el('p', 'empty', 'Aucune opération sur cette année.'))
   else {
-    const table = el('table', 'grid')
-    const headRow = el('tr')
-    for (const label of ['Date', 'Libellé', 'Montant', 'Catégorie', '']) {
-      headRow.append(el('th', label === 'Catégorie' ? 'point' : '', label))
-    }
-    table.append(headRow)
+    const table = lineTable('Date', 'Libellé', 'Montant', 'Catégorie', '')
     for (const operation of operations) {
       const row = el('tr')
-      if (operationsEdit && editingOperationId === operation.id) {
-        const date = dateInput(operation.date)
-        const label = textInput(operation.label)
-        const amount = amountInput(formatInputAmount(operation.amountCents))
-        row.append(cell(date), cell(label), cell(amount))
-        row.append(el('td'), operationActions(operation, { date, label, amount }))
-      } else {
-        row.append(el('td', '', formatIsoDate(operation.date)), el('td', '', operation.label))
-        row.append(moneyCell(operation.amountCents))
-        row.append(
-          pointCell(
-            operation.amountCents,
-            operation.categoryId,
-            operation.categoryName,
-            operation.id,
-            accountId,
-            operation.counterpartyAccountId,
-            loadDetail,
-          ),
-          operationActions(operation),
-        )
-      }
+      row.append(dateCell(formatIsoDate(operation.date)), labelText(operation.label), moneyCell(operation.amountCents))
+      row.append(
+        pointCell(
+          operation.amountCents,
+          operation.categoryId,
+          operation.categoryName,
+          operation.id,
+          accountId,
+          operation.counterpartyAccountId,
+          loadDetail,
+        ),
+        operationActions(operation),
+      )
       table.append(row)
     }
     card.append(wrap(table))
@@ -1431,19 +1561,16 @@ function renderPreview(id: number): HTMLElement {
   }
   if (preview?.status === 'ok') {
     card.append(el('p', '', `${preview.ready} prêtes, ${preview.duplicate} déjà présentes, ${preview.rejected} rejetées.`))
-    const table = el('table', 'grid')
-    const head = el('tr')
-    for (const label of ['Ligne', 'État', 'Date', 'Libellé', 'Montant', 'Motif']) head.append(el('th', '', label))
-    table.append(head)
+    const table = lineTable('Ligne', 'État', 'Date', 'Libellé', 'Montant', 'Motif')
     for (const line of preview.lines) {
       const row = el('tr')
       row.append(
-        el('td', '', String(line.line)),
-        el('td', `status-${line.status}`, line.status === 'ready' ? 'prête' : line.status === 'duplicate' ? 'déjà présente' : 'rejetée'),
-        el('td', '', line.date ? formatIsoDate(line.date) : ''),
-        el('td', '', line.label ?? ''),
-        line.amountCents === undefined ? el('td', '') : moneyCell(line.amountCents),
-        el('td', '', line.reason ?? ''),
+        el('td', 'when', String(line.line)),
+        el('td', `note status-${line.status}`, line.status === 'ready' ? 'prête' : line.status === 'duplicate' ? 'déjà présente' : 'rejetée'),
+        dateCell(line.date ? formatIsoDate(line.date) : ''),
+        labelText(line.label ?? ''),
+        line.amountCents === undefined ? el('td', 'num') : moneyCell(line.amountCents),
+        el('td', 'note', line.reason ?? ''),
       )
       table.append(row)
     }
@@ -1483,29 +1610,77 @@ function renderPointing(): HTMLElement {
     render()
   })
   page.append(labeled('Compte', select))
+  page.append(pointingForm())
   if (unpointed.length === 0) page.append(el('p', 'empty', 'Tout est pointé.'))
-  const table = el('table', 'grid')
-  const head = el('tr')
-  for (const label of ['Date', 'Compte', 'Libellé', 'Montant', 'Catégorie']) {
-    const className = label === 'Libellé' ? 'label' : label === 'Catégorie' ? 'point' : label === 'Compte' ? 'account' : ''
-    head.append(el('th', className, label))
-  }
-  table.append(head)
+  const table = lineTable('Date', 'Compte', 'Libellé', 'Montant', 'Catégorie', '')
   for (const row of unpointed) {
     const line = el('tr')
-    const labelCell = el('td', 'label')
-    labelCell.append(el('div', 'label-text', row.label))
     const accountCell = el('td', 'account')
     accountCell.append(el('div', '', row.accountName), el('div', 'muted', row.bankName))
-    line.append(el('td', '', formatIsoDate(row.date)), accountCell, labelCell, moneyCell(row.amountCents))
-    line.append(pointCell(row.amountCents, row.suggestedCategoryId, null, row.id, row.accountId, null, async () => {
-      await loadUnpointed()
-      if (screen === 'account') await loadDetail()
-    }))
+    const lineRef = { id: row.id, label: row.label, categoryId: null }
+    if (editingOperationId === row.id) {
+      const date = dateInput(row.date)
+      const label = labelField(row.label)
+      const amount = amountInput(formatInputAmount(row.amountCents))
+      line.append(dateCell(date), accountCell, labelEditor(label), amountCell(amount), el('td', 'point'))
+      line.append(operationActions(lineRef, { date, label, amount }, true))
+    } else {
+      line.append(dateCell(formatIsoDate(row.date)), accountCell, labelText(row.label), moneyCell(row.amountCents))
+      line.append(pointCell(row.amountCents, row.suggestedCategoryId, null, row.id, row.accountId, null, async () => {
+        await loadUnpointed()
+        if (screen === 'account') await loadDetail()
+      }))
+      line.append(operationActions(lineRef, undefined, true))
+    }
     table.append(line)
   }
   if (unpointed.length > 0) page.append(el('div', 'card', wrap(table)))
   return page
+}
+
+function pointingAccounts(): AccountCard[] {
+  return (workspace?.accounts ?? []).filter((item) => !item.archived && item.kind === 'courant')
+}
+
+function pointingForm(): HTMLElement {
+  const box = el('div', 'card manual-operation')
+  box.append(el('p', 'muted', 'Ajoute une ligne au relevé. Une dépense est négative, un encaissement est positif.'))
+  const accounts = pointingAccounts()
+  const account = el('select') as HTMLSelectElement
+  if (pointFilter === null) account.append(option('', 'Choisir'))
+  for (const item of accounts) account.append(option(String(item.id), item.name))
+  if (pointFilter !== null) account.value = String(pointFilter)
+  const date = dateInput(todayIso())
+  const label = labelField('')
+  const amount = amountInput('')
+  amount.placeholder = '0,00'
+  const form = el('div', 'form-row entry point-add')
+  form.append(labeled('Compte', account), labeled('Date', date), labeled('Libellé', label), labeled('Montant', amount))
+  box.append(form)
+  box.append(
+    button('Ajouter', 'primary', () => {
+      if (!account.value) {
+        notice = 'Choisis le compte.'
+        render()
+        return
+      }
+      void addOperation(Number(account.value), date.value, label.value, amount.value)
+    }),
+  )
+  return box
+}
+
+async function addOperation(accountId: number, date: string, label: string, amount: string): Promise<void> {
+  const saved = await ask(window.comptes.createOperation(accountId, date, label, amount))
+  if (saved === null) {
+    render()
+    return
+  }
+  notice = 'Mouvement enregistré.'
+  editingOperationId = null
+  await loadWorkspace()
+  await loadUnpointed()
+  render()
 }
 
 function renderCategories(): HTMLElement {
@@ -1682,9 +1857,63 @@ async function saveCategoryLine(category: Category, name: string, familyId: numb
   render()
 }
 
+function lineTable(...headers: string[]): HTMLElement {
+  const table = el('table', 'grid lines')
+  const head = el('tr')
+  for (const label of headers) head.append(el('th', lineColumn(label), label))
+  table.append(head)
+  return table
+}
+
+function lineColumn(label: string): string {
+  if (label === 'Date' || label === 'Ligne') return 'when'
+  if (label === 'Libellé') return 'clip-label'
+  if (label === 'Montant') return 'num'
+  if (label === 'Catégorie') return 'point'
+  if (label === 'Compte') return 'account'
+  if (label === 'État' || label === 'Motif') return 'note'
+  if (label === '') return 'actions'
+  return ''
+}
+
+function amountCell(field: HTMLInputElement): HTMLElement {
+  const cell = el('td', 'num')
+  cell.append(field)
+  return cell
+}
+
+function dateCell(value: string | HTMLElement): HTMLElement {
+  if (typeof value === 'string') return el('td', 'when', value)
+  const cell = el('td', 'when')
+  cell.append(value)
+  return cell
+}
+
+function labelText(text: string): HTMLElement {
+  const cell = el('td', 'clip-label')
+  cell.append(el('div', 'label-text', text))
+  return cell
+}
+
+function labelField(value: string): HTMLTextAreaElement {
+  const input = document.createElement('textarea')
+  input.className = 'label-field'
+  input.value = value
+  input.rows = 2
+  input.placeholder = 'Libellé'
+  return input
+}
+
+function labelEditor(field: HTMLTextAreaElement): HTMLElement {
+  const cell = el('td', 'clip-label')
+  cell.append(field)
+  return cell
+}
+
 function operationActions(
-  operation: OperationView,
-  editing?: { date: HTMLInputElement; label: HTMLInputElement; amount: HTMLInputElement },
+  operation: { id: number; label: string; categoryId: number | null },
+  editing?: { date: HTMLInputElement; label: HTMLTextAreaElement; amount: HTMLInputElement },
+  manage = false,
 ): HTMLElement {
   const actions = el('td', 'actions')
   if (editing) {
@@ -1694,7 +1923,7 @@ function operationActions(
       }),
       button('Annuler', 'small', () => {
         editingOperationId = null
-        void loadDetail()
+        render()
       }),
     )
     return actions
@@ -1704,7 +1933,7 @@ function operationActions(
       void clearPoint(operation.id)
     }))
   }
-  if (operationsEdit) {
+  if (manage) {
     actions.append(
       button('Modifier', 'small', () => {
         editingOperationId = operation.id
@@ -1746,12 +1975,13 @@ async function saveManual(operationId: number, date: string, label: string, amou
     return
   }
   editingOperationId = null
-  await loadDetail()
   await loadWorkspace()
+  if (screen === 'pointing') await loadUnpointed()
+  if (accountId) await loadDetail()
   render()
 }
 
-async function eraseManual(operation: OperationView): Promise<void> {
+async function eraseManual(operation: { id: number; label: string }): Promise<void> {
   if (!window.confirm(`Effacer « ${operation.label} » ?`)) return
   const saved = await ask(window.comptes.deleteManualOperation(operation.id))
   if (saved === null) {
@@ -1759,8 +1989,9 @@ async function eraseManual(operation: OperationView): Promise<void> {
     return
   }
   editingOperationId = null
-  await loadDetail()
   await loadWorkspace()
+  if (screen === 'pointing') await loadUnpointed()
+  if (accountId) await loadDetail()
   render()
 }
 
@@ -1938,13 +2169,14 @@ async function go(next: Screen): Promise<void> {
   accountTab = 'depense'
   movingCategoryId = null
   categoriesEdit = false
-  operationsEdit = false
   editing = false
   draftBank = null
   preview = null
   notice = ''
   drill = null
   editingOperationId = null
+  statementDate = ''
+  statementLook = null
   if (next !== 'account') detail = null
   await writes
   if (status.state === 'ready') await loadWorkspace()
@@ -1955,12 +2187,13 @@ async function openAccount(id: number): Promise<void> {
   accountId = id
   screen = 'account'
   accountTab = 'depense'
-  operationsEdit = false
   editing = false
   editingOperationId = null
   draftBank = null
   preview = null
   notice = ''
+  statementDate = ''
+  statementLook = null
   drill = null
   await loadDetail()
   render()
