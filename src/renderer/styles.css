@@ -809,6 +809,7 @@ td.num button.amount {
 
 .status-ready { color: #1d6b45; }
 .status-duplicate { color: #8a5a12; }
+.status-linked { color: #1d4e89; }
 .status-rejected { color: #8d2f2f; }
 
 .setup {

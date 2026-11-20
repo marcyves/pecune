@@ -391,6 +391,7 @@ describe('règles du classeur', () => {
     const spaced = csv(dir, 'espaces.csv', 'Date;Libelle;Montant\n10/01/2026;AUCHAN\u00a0;-12,50\n')
     await expect(confirmImport(database, account.id, spaced)).rejects.toThrow(/Aucune ligne/)
 
+    if (imported.batchId === null) throw new Error('lot')
     const removed = cancelBatch(database, imported.batchId)
     expect(removed).toBe(2)
     expect(operationCount(database, account.id)).toBe(0)
@@ -1288,6 +1289,139 @@ describe('règles du classeur', () => {
     const kept = listOperations(database, joint.id, 2026).find((row) => row.id === sunday!.id)
     expect(kept?.date).toBe('2026-03-08')
     expect(kept?.valueDate).toBe('2026-03-10')
+  })
+
+  it('reprend le virement pointé malgré une date ou un libellé différents', async () => {
+    const { database, dir } = tempDatabase()
+    const ccp = createAccount(database, {
+      name: 'CCP',
+      bankName: 'Banque Postale',
+      kind: 'courant',
+      mapping: signed,
+      openingCents: 0,
+      openingDate: '2026-01-01',
+    })
+    const joint = createAccount(database, {
+      name: 'Joint',
+      bankName: 'CCF',
+      kind: 'courant',
+      mapping: signed,
+      openingCents: 0,
+      openingDate: '2026-01-01',
+    })
+    await confirmImport(database, ccp.id, csv(dir, 'ccp.csv', 'Date;Libelle;Montant\n06/03/2026;VIR JOINT;-40,00\n'))
+    const outgoing = listOperations(database, ccp.id, 2026)[0]
+    pointOperation(database, outgoing.id, outgoingCategory(database), joint.id, null)
+    createOperation(database, joint.id, '2026-03-09', 'AUTRE', '40,00')
+
+    const file = csv(dir, 'joint.csv', 'Date;Libelle;Montant\n09/03/2026;VIR INST CCP;40,00\n09/03/2026;COURSES;-15,00\n')
+    const preview = await previewImport(database, joint.id, file)
+    expect(preview.status).toBe('ok')
+    if (preview.status !== 'ok') return
+    expect(preview.linked).toBe(1)
+    expect(preview.ready).toBe(1)
+    expect(preview.lines.find((line) => line.status === 'linked')).toMatchObject({
+      date: '2026-03-09',
+      label: 'VIR INST CCP',
+      amountCents: 4000,
+      reason: 'Virement déjà pointé',
+    })
+
+    const imported = await confirmImport(database, joint.id, file)
+    expect(imported).toMatchObject({ inserted: 1, linked: 1 })
+    const rows = listOperations(database, joint.id, 2026)
+    expect(rows).toHaveLength(3)
+    expect(rows.find((row) => row.label === 'VIR INST CCP')).toMatchObject({
+      date: '2026-03-09',
+      amountCents: 4000,
+      categoryName: 'Virement reçu',
+      counterpartyAccountName: 'CCP',
+      imported: false,
+    })
+    expect(rows.find((row) => row.label === 'AUTRE')?.categoryId).toBeNull()
+    expect(rows.find((row) => row.label === 'COURSES')?.imported).toBe(true)
+    expect(listOperations(database, ccp.id, 2026)[0].categoryName).toBe('Virement')
+    await expect(confirmImport(database, joint.id, file)).rejects.toThrow(/Aucune ligne/)
+
+    if (imported.batchId === null) throw new Error('lot')
+    expect(cancelBatch(database, imported.batchId)).toBe(1)
+    const kept = listOperations(database, joint.id, 2026)
+    expect(kept.map((row) => row.label).sort()).toEqual(['AUTRE', 'VIR INST CCP'])
+    expect(kept.find((row) => row.label === 'VIR INST CCP')?.categoryName).toBe('Virement reçu')
+  })
+
+  it('laisse une ligne trop éloignée du virement pointé', async () => {
+    const { database, dir } = tempDatabase()
+    const ccp = createAccount(database, {
+      name: 'CCP',
+      bankName: 'Banque Postale',
+      kind: 'courant',
+      mapping: signed,
+      openingCents: 0,
+      openingDate: '2026-01-01',
+    })
+    const joint = createAccount(database, {
+      name: 'Joint',
+      bankName: 'CCF',
+      kind: 'courant',
+      mapping: signed,
+      openingCents: 0,
+      openingDate: '2026-01-01',
+    })
+    await confirmImport(database, ccp.id, csv(dir, 'ccp.csv', 'Date;Libelle;Montant\n09/03/2026;VIR JOINT;-40,00\n'))
+    pointOperation(database, listOperations(database, ccp.id, 2026)[0].id, outgoingCategory(database), joint.id, null)
+    await confirmImport(database, joint.id, csv(dir, 'joint.csv', 'Date;Libelle;Montant\n05/03/2026;ANCIEN VIR;40,00\n'))
+    const rows = listOperations(database, joint.id, 2026)
+    expect(rows.map((row) => row.label)).toEqual(['ANCIEN VIR', 'Virement de CCP'])
+  })
+
+  it('rapproche chaque relevé du virement pointé le plus proche', async () => {
+    const { database, dir } = tempDatabase()
+    const ccp = createAccount(database, {
+      name: 'CCP',
+      bankName: 'Banque Postale',
+      kind: 'courant',
+      mapping: signed,
+      openingCents: 0,
+      openingDate: '2026-01-01',
+    })
+    const joint = createAccount(database, {
+      name: 'Joint',
+      bankName: 'CCF',
+      kind: 'courant',
+      mapping: signed,
+      openingCents: 0,
+      openingDate: '2026-01-01',
+    })
+    const livret = createAccount(database, { name: 'Livret A', bankName: 'Banque Postale', kind: 'epargne' })
+    await confirmImport(
+      database,
+      ccp.id,
+      csv(dir, 'ccp.csv', 'Date;Libelle;Montant\n10/03/2026;VIR UN;-40,00\n11/03/2026;VIR DEUX;-40,00\n'),
+    )
+    for (const row of listOperations(database, ccp.id, 2026)) {
+      pointOperation(database, row.id, outgoingCategory(database), joint.id, null)
+    }
+    await confirmImport(database, joint.id, csv(dir, 'un.csv', 'Date;Libelle;Montant\n11/03/2026;RECU;40,00\n'))
+    const once = listOperations(database, joint.id, 2026)
+    expect(once).toHaveLength(2)
+    expect(once.find((row) => row.date === '2026-03-10')?.label).toBe('Virement de CCP')
+    expect(once.find((row) => row.date === '2026-03-11')).toMatchObject({ label: 'RECU', categoryName: 'Virement reçu' })
+
+    await confirmImport(database, joint.id, csv(dir, 'deux.csv', 'Date;Libelle;Montant\n10/03/2026;RECU BIS;40,00\n'))
+    const twice = listOperations(database, joint.id, 2026)
+    expect(twice).toHaveLength(2)
+    expect(twice.find((row) => row.date === '2026-03-10')?.label).toBe('RECU BIS')
+    expect(twice.find((row) => row.date === '2026-03-11')?.label).toBe('RECU')
+
+    createSavingsTransfer(database, livret.id, joint.id, '2026-04-03', '15,50')
+    await confirmImport(database, joint.id, csv(dir, 'livret.csv', 'Date;Libelle;Montant\n06/04/2026;APPORT LIVRET;15,50\n'))
+    expect(listOperations(database, joint.id, 2026).find((row) => row.amountCents === 1550)).toMatchObject({
+      date: '2026-04-06',
+      label: 'APPORT LIVRET',
+      categoryName: 'Virement reçu',
+      counterpartyAccountName: 'Livret A',
+    })
   })
 })
 

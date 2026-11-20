@@ -64,18 +64,19 @@ export type Family = {
 
 export type PreviewLine = {
   line: number
-  status: 'ready' | 'duplicate' | 'rejected'
+  status: 'ready' | 'duplicate' | 'linked' | 'rejected'
   date?: string
   label?: string
   amountCents?: number
   reason?: string
+  operationId?: number
 }
 
 export type Preview =
   | { status: 'error'; message: string }
   | { status: 'choose-sheet'; sheets: string[] }
   | { status: 'blocked'; foundHeaders: string[]; missing: string[] }
-  | { status: 'ok'; lines: PreviewLine[]; ready: number; duplicate: number; rejected: number }
+  | { status: 'ok'; lines: PreviewLine[]; ready: number; duplicate: number; linked: number; rejected: number }
 
 export type CategoryRow = {
   categoryId: number

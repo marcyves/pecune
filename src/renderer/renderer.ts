@@ -15,6 +15,7 @@ import type {
   OperationView,
   Position,
   Preview,
+  PreviewLine,
   StatementCheck,
   StatementSummary,
   TransferMatch,
@@ -85,7 +86,11 @@ type ComptesApi = {
   setCash: (accountId: number, raw: string, valuedOn: string) => Promise<Result<unknown>>
   pickImportFile: () => Promise<Result<string | null>>
   previewImport: (accountId: number, filePath: string, sheetName?: string) => Promise<Result<Preview>>
-  confirmImport: (accountId: number, filePath: string, sheetName?: string) => Promise<Result<unknown>>
+  confirmImport: (
+    accountId: number,
+    filePath: string,
+    sheetName?: string,
+  ) => Promise<Result<{ batchId: number | null; inserted: number; linked: number }>>
   cancelBatch: (batchId: number) => Promise<Result<number>>
   unpointed: (accountId: number | null) => Promise<Result<UnpointedView[]>>
   previewOperationTransfer: (operationId: number, counterpartyAccountId: number) => Promise<Result<TransferMatch[]>>
@@ -1560,13 +1565,16 @@ function renderPreview(id: number): HTMLElement {
     return card
   }
   if (preview?.status === 'ok') {
-    card.append(el('p', '', `${preview.ready} prêtes, ${preview.duplicate} déjà présentes, ${preview.rejected} rejetées.`))
+    const counts = [`${preview.ready} prêtes`, `${preview.duplicate} déjà présentes`]
+    if (preview.linked > 0) counts.push(`${preview.linked} virements repris`)
+    counts.push(`${preview.rejected} rejetées`)
+    card.append(el('p', '', `${counts.join(', ')}.`))
     const table = lineTable('Ligne', 'État', 'Date', 'Libellé', 'Montant', 'Motif')
     for (const line of preview.lines) {
       const row = el('tr')
       row.append(
         el('td', 'when', String(line.line)),
-        el('td', `note status-${line.status}`, line.status === 'ready' ? 'prête' : line.status === 'duplicate' ? 'déjà présente' : 'rejetée'),
+        el('td', `note status-${line.status}`, importState(line.status)),
         dateCell(line.date ? formatIsoDate(line.date) : ''),
         labelText(line.label ?? ''),
         line.amountCents === undefined ? el('td', 'num') : moneyCell(line.amountCents),
@@ -1575,9 +1583,15 @@ function renderPreview(id: number): HTMLElement {
       table.append(row)
     }
     card.append(wrap(table))
-    if (preview.ready > 0) {
+    if (preview.ready > 0 || preview.linked > 0) {
+      const label =
+        preview.ready > 0
+          ? `Importer ${preview.ready} lignes`
+          : preview.linked > 1
+            ? `Reprendre ${preview.linked} virements`
+            : 'Reprendre le virement'
       card.append(
-        button(`Importer ${preview.ready} lignes`, 'primary', async () => {
+        button(label, 'primary', async () => {
           const done = await ask(window.comptes.confirmImport(id, importFile as string, importSheet || undefined))
           if (!done) {
             render()
@@ -1585,7 +1599,8 @@ function renderPreview(id: number): HTMLElement {
           }
           preview = null
           importFile = null
-          notice = 'Import enregistré.'
+          notice =
+            done.inserted === 0 ? (done.linked > 1 ? `${done.linked} virements repris.` : 'Virement repris.') : 'Import enregistré.'
           await loadWorkspace()
           render()
         }),
@@ -1593,6 +1608,13 @@ function renderPreview(id: number): HTMLElement {
     }
   }
   return card
+}
+
+function importState(status: PreviewLine['status']): string {
+  if (status === 'ready') return 'prête'
+  if (status === 'duplicate') return 'déjà présente'
+  if (status === 'linked') return 'virement repris'
+  return 'rejetée'
 }
 
 function renderPointing(): HTMLElement {

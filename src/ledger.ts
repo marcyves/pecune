@@ -19,6 +19,7 @@ import type {
   OperationView,
   Position,
   Preview,
+  PreviewLine,
   StatementCheck,
   StatementMovement,
   TransferMatch,
@@ -533,11 +534,13 @@ export async function previewImport(
     if ('missing' in classified) {
       return { status: 'blocked', foundHeaders: table.headers.filter((header) => header !== ''), missing: classified.missing }
     }
+    claimTransferMirrors(database, accountId, classified.lines)
     return {
       status: 'ok',
       lines: classified.lines,
       ready: classified.lines.filter((line) => line.status === 'ready').length,
       duplicate: classified.lines.filter((line) => line.status === 'duplicate').length,
+      linked: classified.lines.filter((line) => line.status === 'linked').length,
       rejected: classified.lines.filter((line) => line.status === 'rejected').length,
     }
   } catch (error) {
@@ -550,19 +553,23 @@ export async function confirmImport(
   accountId: number,
   filePath: string,
   sheetName?: string,
-): Promise<{ batchId: number; inserted: number }> {
+): Promise<{ batchId: number | null; inserted: number; linked: number }> {
   const preview = await previewImport(database, accountId, filePath, sheetName)
   if (preview.status === 'error') throw new LedgerError(preview.message)
   if (preview.status === 'choose-sheet') throw new LedgerError('Choisis une feuille.')
   if (preview.status === 'blocked') throw new LedgerError(`En-tête manquant : ${preview.missing.join(', ')}`)
   const ready = preview.lines.filter((line) => line.status === 'ready')
-  if (ready.length === 0) throw new LedgerError('Aucune ligne à importer.')
+  const linked = preview.lines.filter((line) => line.status === 'linked')
+  if (ready.length === 0 && linked.length === 0) throw new LedgerError('Aucune ligne à importer.')
   const batchId = transaction(database, () => {
-    const id = insert(
-      database,
-      'INSERT INTO import_batches (account_id, imported_at, filename) VALUES (?, ?, ?)',
-      [accountId, new Date().toISOString(), basename(filePath)],
-    )
+    const id =
+      ready.length === 0
+        ? null
+        : insert(
+            database,
+            'INSERT INTO import_batches (account_id, imported_at, filename) VALUES (?, ?, ?)',
+            [accountId, new Date().toISOString(), basename(filePath)],
+          )
     for (const line of ready) {
       if (!line.date || line.amountCents === undefined) throw new LedgerError('Ligne incomplète.')
       insert(
@@ -571,9 +578,10 @@ export async function confirmImport(
         [accountId, id, line.date, line.label ?? '', line.amountCents],
       )
     }
+    for (const line of linked) adoptImportedMirror(database, accountId, line)
     return id
   })
-  return { batchId, inserted: ready.length }
+  return { batchId, inserted: ready.length, linked: linked.length }
 }
 
 export function listBatches(database: DatabaseSync, accountId: number): BatchView[] {
@@ -1162,6 +1170,71 @@ function suggestCategory(
   if (ranked.length === 0) return null
   if (ranked.length > 1 && ranked[0][1].keywords === ranked[1][1].keywords) return null
   return ranked[0][0]
+}
+
+function claimTransferMirrors(database: DatabaseSync, accountId: number, lines: PreviewLine[]): void {
+  const mirrors = pendingMirrors(database, accountId)
+  if (mirrors.length === 0) return
+  const candidates: { lineIndex: number; mirrorId: number; distance: number }[] = []
+  lines.forEach((line, lineIndex) => {
+    if (line.status !== 'ready' || !line.date || line.amountCents === undefined) return
+    for (const mirror of mirrors) {
+      if (mirror.amountCents !== line.amountCents) continue
+      if (!nearbyTransferDate(line.date, mirror.date)) continue
+      candidates.push({ lineIndex, mirrorId: mirror.id, distance: dayDistance(line.date, mirror.date) })
+    }
+  })
+  candidates.sort((left, right) => left.distance - right.distance || left.lineIndex - right.lineIndex || left.mirrorId - right.mirrorId)
+  const usedLines = new Set<number>()
+  const usedMirrors = new Set<number>()
+  for (const candidate of candidates) {
+    if (usedLines.has(candidate.lineIndex) || usedMirrors.has(candidate.mirrorId)) continue
+    usedLines.add(candidate.lineIndex)
+    usedMirrors.add(candidate.mirrorId)
+    const line = lines[candidate.lineIndex]
+    line.status = 'linked'
+    line.operationId = candidate.mirrorId
+    line.reason = 'Virement déjà pointé'
+  }
+}
+
+function pendingMirrors(database: DatabaseSync, accountId: number): { id: number; date: string; amountCents: number }[] {
+  return all(
+    database,
+    `SELECT o.id, o.date, o.amount_cents
+     FROM operations o
+     JOIN transfers t ON t.dest_operation_id = o.id
+     WHERE o.account_id = ? AND o.batch_id IS NULL
+     ORDER BY o.id`,
+    [accountId],
+  ).map((row) => ({
+    id: numberValue(row.id),
+    date: String(row.date),
+    amountCents: numberValue(row.amount_cents),
+  }))
+}
+
+function adoptImportedMirror(database: DatabaseSync, accountId: number, line: PreviewLine): void {
+  if (!line.operationId || !line.date || line.amountCents === undefined) throw new LedgerError('Ligne incomplète.')
+  const row = one(
+    database,
+    `SELECT o.amount_cents, o.batch_id
+     FROM operations o
+     JOIN transfers t ON t.dest_operation_id = o.id
+     WHERE o.id = ? AND o.account_id = ?`,
+    [line.operationId, accountId],
+  )
+  if (!row || row.batch_id !== null || numberValue(row.amount_cents) !== line.amountCents) {
+    throw new LedgerError('Ce virement ne correspond plus à la ligne importée.')
+  }
+  run(database, 'UPDATE operations SET date = ?, label = ? WHERE id = ?', [line.date, line.label ?? '', line.operationId])
+}
+
+function dayDistance(left: string, right: string): number {
+  const [leftYear, leftMonth, leftDay] = left.split('-').map(Number)
+  const [rightYear, rightMonth, rightDay] = right.split('-').map(Number)
+  const span = Date.UTC(leftYear, leftMonth - 1, leftDay) - Date.UTC(rightYear, rightMonth - 1, rightDay)
+  return Math.abs(Math.round(span / 86_400_000))
 }
 
 function existingCounts(database: DatabaseSync, accountId: number): Map<string, number> {
