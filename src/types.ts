@@ -44,6 +44,12 @@ export type StatementCheck = {
   movements: StatementMovement[]
 }
 
+export type StatementLock = {
+  date: string
+  cents: number
+  currentCents: number | null
+}
+
 export type Category = {
   id: number
   name: string

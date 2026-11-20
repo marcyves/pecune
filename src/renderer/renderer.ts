@@ -17,6 +17,7 @@ import type {
   Preview,
   PreviewLine,
   StatementCheck,
+  StatementLock,
   StatementSummary,
   TransferMatch,
   TransferView,
@@ -49,6 +50,7 @@ type Detail = {
   batches: BatchView[]
   transfers: TransferView[]
   statement: StatementCheck | null
+  statements: StatementLock[]
 }
 
 type Screen = 'global' | 'accounts' | 'account' | 'pointing' | 'categories'
@@ -73,7 +75,7 @@ type ComptesApi = {
   setMonthlyBalance: (accountId: number, month: string, raw: string) => Promise<Result<unknown>>
   statementAt: (accountId: number, date: string) => Promise<Result<StatementCheck>>
   validateStatement: (accountId: number, date: string) => Promise<Result<Account>>
-  clearStatement: (accountId: number) => Promise<Result<Account>>
+  clearStatement: (accountId: number, date: string) => Promise<Result<Account>>
   savePosition: (input: {
     accountId: number
     id?: number
@@ -611,7 +613,7 @@ function renderAccount(): HTMLElement {
   }
   page.append(tools)
   page.append(accountHeadingFigures(account, detail.summary))
-  page.append(statementCard(account, detail.statement))
+  page.append(statementCard(account, detail.statements))
   if (account.kind === 'courant') {
     page.append(renderBatches(detail.batches, account))
     if (preview && importFile) page.append(renderPreview(account.id))
@@ -653,43 +655,17 @@ function accountHeadingFigures(account: Account, summary: AccountSummary): HTMLE
   return box
 }
 
-function statementCard(account: Account, statement: StatementCheck | null): HTMLElement {
+function statementCard(account: Account, locks: StatementLock[]): HTMLElement {
   const card = el('section', 'card')
   card.append(el('h2', '', 'Relevé'))
   card.append(
     el(
       'p',
       'muted',
-      'Choisis la date du relevé papier. Le solde calculé s’affiche, puis tu valides s’il correspond.',
+      'Choisis la date du relevé papier. Le solde calculé s’affiche, puis tu valides s’il correspond. Chaque validation est conservée.',
     ),
   )
-  if (account.reconciledOn && account.reconciledCents !== null) {
-    if (statement && statement.cents === account.reconciledCents) {
-      card.append(
-        el(
-          'p',
-          'statement-status',
-          `Validé le ${formatIsoDate(account.reconciledOn)} : ${formatEuros(account.reconciledCents)}.`,
-        ),
-      )
-    } else if (statement && statement.cents !== null) {
-      card.append(
-        el(
-          'div',
-          'banner',
-          `Le solde au ${formatIsoDate(account.reconciledOn)} ne correspond plus au relevé validé. Il était ${formatEuros(account.reconciledCents)}, il est maintenant ${formatEuros(statement.cents)}.`,
-        ),
-      )
-    } else {
-      card.append(
-        el(
-          'div',
-          'banner',
-          `Le solde au ${formatIsoDate(account.reconciledOn)} n’est plus calculable. Le relevé validé indiquait ${formatEuros(account.reconciledCents)}.`,
-        ),
-      )
-    }
-  }
+  if (locks.length > 0) card.append(statementHistory(account.id, locks))
   const date = dateInput(statementDate || account.reconciledOn || '')
   date.addEventListener('change', () => {
     statementDate = date.value
@@ -703,9 +679,6 @@ function statementCard(account: Account, statement: StatementCheck | null): HTML
       void showStatement(account.id, date.value)
     }),
   )
-  if (account.reconciledOn) {
-    row.append(button('Retirer la validation', '', () => { void dropStatement(account.id) }))
-  }
   card.append(row)
   if (statementLook) card.append(statementResult(account, statementLook))
   return card
@@ -802,8 +775,37 @@ async function keepStatement(accountId: number, date: string): Promise<void> {
   render()
 }
 
-async function dropStatement(accountId: number): Promise<void> {
-  const saved = await ask(window.comptes.clearStatement(accountId))
+function statementHistory(accountId: number, locks: StatementLock[]): HTMLElement {
+  const box = el('div', 'statement-history')
+  for (const lock of locks) {
+    const row = el('div', 'toolbar')
+    if (lock.currentCents === lock.cents) {
+      row.append(el('p', 'statement-status', `Validé le ${formatIsoDate(lock.date)} : ${formatEuros(lock.cents)}.`))
+    } else if (lock.currentCents !== null) {
+      row.append(
+        el(
+          'div',
+          'banner',
+          `Le solde au ${formatIsoDate(lock.date)} ne correspond plus au relevé validé. Il était ${formatEuros(lock.cents)}, il est maintenant ${formatEuros(lock.currentCents)}.`,
+        ),
+      )
+    } else {
+      row.append(
+        el(
+          'div',
+          'banner',
+          `Le solde au ${formatIsoDate(lock.date)} n’est plus calculable. Le relevé validé indiquait ${formatEuros(lock.cents)}.`,
+        ),
+      )
+    }
+    row.append(button('Retirer', '', () => { void dropStatement(accountId, lock.date) }))
+    box.append(row)
+  }
+  return box
+}
+
+async function dropStatement(accountId: number, date: string): Promise<void> {
+  const saved = await ask(window.comptes.clearStatement(accountId, date))
   if (!saved) {
     render()
     return

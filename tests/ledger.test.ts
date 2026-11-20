@@ -23,10 +23,12 @@ import {
   deleteTransfer,
   deleteAccount,
   deletePosition,
+  getAccount,
   globalSummary,
   listAccounts,
   listFamilies,
   listOperations,
+  listStatements,
   listUnpointed,
   moveAccount,
   operationCount,
@@ -121,7 +123,7 @@ describe('base', () => {
     const database = openDatabase(path)
     databases.push(database)
     const version = database.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as { value: string }
-    expect(version.value).toBe('13')
+    expect(version.value).toBe('14')
     const legacy = listAccounts(database).find((account) => account.bankName === 'Banque Postale')
     expect(legacy?.kind).toBe('epargne')
     expect(legacy?.cashMillis).toBeNull()
@@ -1149,16 +1151,26 @@ describe('règles du classeur', () => {
     const validated = validateStatement(database, account.id, '2026-03-31')
     expect(validated.reconciledOn).toBe('2026-03-31')
     expect(validated.reconciledCents).toBe(6000)
-    await confirmImport(database, account.id, csv(dir, 'suite.csv', 'Date;Libelle;Montant\n20/03/2026;EDF;-10,00\n02/04/2026;EAU;-5,00\n'))
-    const drifted = statementAt(database, account.id, '2026-03-31')
-    expect(drifted.cents).toBe(5000)
-    expect(drifted.movements).toEqual([])
+    expect(listStatements(database, account.id)).toEqual([{ date: '2026-03-31', cents: 6000, currentCents: 6000 }])
+    await expect(
+      confirmImport(database, account.id, csv(dir, 'suite.csv', 'Date;Libelle;Montant\n20/03/2026;EDF;-10,00\n02/04/2026;EAU;-5,00\n')),
+    ).rejects.toThrow(/relevé du 31\/03\/2026/)
+    expect(listOperations(database, account.id, 2026).map((row) => row.label)).toEqual(['LOYER'])
+    await confirmImport(database, account.id, csv(dir, 'avril.csv', 'Date;Libelle;Montant\n02/04/2026;EAU;-5,00\n'))
+    expect(statementAt(database, account.id, '2026-03-31').cents).toBe(6000)
     const april = statementAt(database, account.id, '2026-04-30')
-    expect(april.cents).toBe(4500)
+    expect(april.cents).toBe(5500)
     expect(april.movements).toEqual([{ date: '2026-04-02', label: 'EAU', amount: -500 }])
-    const cleared = clearStatement(database, account.id)
+    validateStatement(database, account.id, '2026-04-30')
+    expect(listStatements(database, account.id).map((row) => row.date)).toEqual(['2026-04-30', '2026-03-31'])
+    expect(getAccount(database, account.id).reconciledOn).toBe('2026-04-30')
+    const kept = clearStatement(database, account.id, '2026-04-30')
+    expect(kept.reconciledOn).toBe('2026-03-31')
+    expect(kept.reconciledCents).toBe(6000)
+    const cleared = clearStatement(database, account.id, '2026-03-31')
     expect(cleared.reconciledOn).toBeNull()
     expect(cleared.reconciledCents).toBeNull()
+    expect(listStatements(database, account.id)).toEqual([])
   })
 
   it('liste les virements entre deux relevés d’épargne', () => {
@@ -1219,6 +1231,8 @@ describe('règles du classeur', () => {
     expect(statementAt(database, account.id, '2026-04-30').movements).toEqual([
       { date: '2026-04-02', label: 'CHEQUE', amount: 5000 },
     ])
+    expect(() => updateManualOperation(database, line.id, '2026-03-28', 'CHEQUE', '50,00', '')).toThrow(/relevé du 31\/03\/2026/)
+    clearStatement(database, account.id, '2026-03-31')
     updateManualOperation(database, line.id, '2026-03-28', 'CHEQUE', '50,00', '')
     expect(listOperations(database, account.id, 2026)[0].valueDate).toBeNull()
     expect(accountFigures(database, account, '2026-03-31').currentCents).toBe(15000)
@@ -1289,6 +1303,51 @@ describe('règles du classeur', () => {
     const kept = listOperations(database, joint.id, 2026).find((row) => row.id === sunday!.id)
     expect(kept?.date).toBe('2026-03-08')
     expect(kept?.valueDate).toBe('2026-03-10')
+  })
+
+  it('garde les relevés validés et bloque le pointage qui en changerait le solde', async () => {
+    const { database, dir } = tempDatabase()
+    const ccp = createAccount(database, {
+      name: 'CCP',
+      bankName: 'Banque Postale',
+      kind: 'courant',
+      mapping: signed,
+      openingCents: 0,
+      openingDate: '2026-01-01',
+    })
+    const joint = createAccount(database, {
+      name: 'Joint',
+      bankName: 'CCF',
+      kind: 'courant',
+      mapping: signed,
+      openingCents: 0,
+      openingDate: '2026-01-01',
+    })
+    validateStatement(database, joint.id, '2026-03-01')
+    await confirmImport(
+      database,
+      ccp.id,
+      csv(dir, 'ccp.csv', 'Date;Libelle;Montant\n10/02/2026;VIR JOINT;-40,00\n15/03/2026;VIR SUITE;-10,00\n'),
+    )
+    const rows = listOperations(database, ccp.id, 2026)
+    const february = rows.find((row) => row.date === '2026-02-10')
+    const march = rows.find((row) => row.date === '2026-03-15')
+    const divers = createFamily(database, { name: 'Divers', nature: 'depense' })
+    const courses = createCategory(database, { name: 'Courses', familyId: divers.id })
+    pointOperation(database, february!.id, courses.id)
+    expect(listOperations(database, ccp.id, 2026).find((row) => row.id === february!.id)?.categoryName).toBe('Courses')
+    expect(() => pointOperation(database, february!.id, outgoingCategory(database), joint.id, null)).toThrow(
+      /relevé du 01\/03\/2026/,
+    )
+    expect(listOperations(database, joint.id, 2026)).toEqual([])
+    expect(listOperations(database, ccp.id, 2026).find((row) => row.id === february!.id)?.categoryName).toBe('Courses')
+    pointOperation(database, march!.id, outgoingCategory(database), joint.id, null)
+    expect(listOperations(database, joint.id, 2026)).toHaveLength(1)
+    expect(listStatements(database, joint.id)[0].currentCents).toBe(0)
+    validateStatement(database, joint.id, '2026-03-31')
+    expect(getAccount(database, joint.id).reconciledCents).toBe(1000)
+    expect(() => unpointOperation(database, march!.id)).toThrow(/relevé du 31\/03\/2026/)
+    expect(listStatements(database, joint.id).map((row) => row.date)).toEqual(['2026-03-31', '2026-03-01'])
   })
 
   it('reprend le virement pointé malgré une date ou un libellé différents', async () => {

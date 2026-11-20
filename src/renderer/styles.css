@@ -262,6 +262,11 @@ table.grid td.account-name {
 
 .statement-status { margin: 0 0 0.8rem; }
 
+.statement-history { display: grid; gap: 0.45rem; margin-bottom: 0.8rem; }
+.statement-history .toolbar { align-items: center; }
+.statement-history .statement-status,
+.statement-history .banner { margin: 0; flex: 1; }
+
 .statement-figures {
   display: flex;
   flex-wrap: wrap;

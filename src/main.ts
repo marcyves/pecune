@@ -29,6 +29,7 @@ import {
   deleteManualOperation,
   deleteTransfer,
   listOperations,
+  listStatements,
   listTransfers,
   listUnpointed,
   moveCategory,
@@ -160,6 +161,7 @@ function accountDetail(id: number, year: number) {
     batches: listBatches(db, id),
     transfers: listTransfers(db, id, year),
     statement: account?.reconciledOn ? statementAt(db, id, account.reconciledOn) : null,
+    statements: account ? listStatements(db, id) : [],
   }
 }
 
@@ -284,7 +286,9 @@ function register(): void {
   handle('validateStatement', (accountId, date) =>
     validateStatement(requireDatabase(), Number(accountId), String(date ?? '')),
   )
-  handle('clearStatement', (accountId) => clearStatement(requireDatabase(), Number(accountId)))
+  handle('clearStatement', (accountId, date) =>
+    clearStatement(requireDatabase(), Number(accountId), String(date ?? '')),
+  )
   handle('savePosition', (input) => {
     const value = input as {
       accountId: number

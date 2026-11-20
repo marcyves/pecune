@@ -26,7 +26,7 @@ const comptes = {
     call<unknown>('setMonthlyBalance', accountId, month, raw),
   statementAt: (accountId: number, date: string) => call<unknown>('statementAt', accountId, date),
   validateStatement: (accountId: number, date: string) => call<unknown>('validateStatement', accountId, date),
-  clearStatement: (accountId: number) => call<unknown>('clearStatement', accountId),
+  clearStatement: (accountId: number, date: string) => call<unknown>('clearStatement', accountId, date),
   savePosition: (input: unknown) => call<unknown>('savePosition', input),
   deletePosition: (id: number) => call<unknown>('deletePosition', id),
   setCash: (accountId: number, raw: string, valuedOn: string) => call<unknown>('setCash', accountId, raw, valuedOn),

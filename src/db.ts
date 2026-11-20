@@ -93,7 +93,16 @@ CREATE TABLE transfers (
 );
 CREATE INDEX idx_transfers_from ON transfers(from_account_id);
 CREATE INDEX idx_transfers_to ON transfers(to_account_id);
-INSERT INTO meta (key, value) VALUES ('schema_version', '13');
+CREATE TABLE statements (
+  id INTEGER PRIMARY KEY,
+  account_id INTEGER NOT NULL REFERENCES accounts(id),
+  date TEXT NOT NULL,
+  amount_cents INTEGER NOT NULL,
+  validated_at TEXT NOT NULL,
+  UNIQUE (account_id, date)
+);
+CREATE INDEX idx_statements_account ON statements(account_id, date);
+INSERT INTO meta (key, value) VALUES ('schema_version', '14');
 `
 
 export function createDatabase(path: string): DatabaseSync {
@@ -132,7 +141,8 @@ function migrate(database: DatabaseSync): void {
   if (schemaVersion(database) === '10') migrateAccountOrder(database)
   if (schemaVersion(database) === '11') migrateStatement(database)
   if (schemaVersion(database) === '12') migrateOperationValueDate(database)
-  if (schemaVersion(database) !== '13') throw new LedgerError('Ce fichier n’est pas une base Comptes.')
+  if (schemaVersion(database) === '13') migrateStatementHistory(database)
+  if (schemaVersion(database) !== '14') throw new LedgerError('Ce fichier n’est pas une base Comptes.')
 }
 
 function schemaVersion(database: DatabaseSync): string | undefined {
@@ -464,6 +474,39 @@ function migrateOperationValueDate(database: DatabaseSync): void {
   }
 }
 
+function migrateStatementHistory(database: DatabaseSync): void {
+  database.exec('BEGIN')
+  try {
+    if (!tableExists(database, 'statements')) {
+      database.exec(`
+        CREATE TABLE statements (
+          id INTEGER PRIMARY KEY,
+          account_id INTEGER NOT NULL REFERENCES accounts(id),
+          date TEXT NOT NULL,
+          amount_cents INTEGER NOT NULL,
+          validated_at TEXT NOT NULL,
+          UNIQUE (account_id, date)
+        );
+        CREATE INDEX idx_statements_account ON statements(account_id, date);
+      `)
+    }
+    if (columnExists(database, 'accounts', 'reconciled_on')) {
+      database.exec(`
+        INSERT INTO statements (account_id, date, amount_cents, validated_at)
+        SELECT id, reconciled_on, reconciled_cents, '1970-01-01T00:00:00.000Z'
+        FROM accounts
+        WHERE reconciled_on IS NOT NULL AND reconciled_cents IS NOT NULL
+        ON CONFLICT(account_id, date) DO NOTHING
+      `)
+    }
+    database.exec(`UPDATE meta SET value = '14' WHERE key = 'schema_version'`)
+    database.exec('COMMIT')
+  } catch (error) {
+    database.exec('ROLLBACK')
+    throw error
+  }
+}
+
 function tableExists(database: DatabaseSync, name: string): boolean {
   return Boolean(database.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(name))
 }
@@ -528,7 +571,7 @@ export function assertDatabase(path: string): void {
     const row = database.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as
       | { value: string }
       | undefined
-    if (!row || !['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13'].includes(row.value)) throw new LedgerError('Ce fichier n’est pas une base Comptes.')
+    if (!row || !['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14'].includes(row.value)) throw new LedgerError('Ce fichier n’est pas une base Comptes.')
   } catch (error) {
     if (error instanceof LedgerError) throw error
     throw new LedgerError('La base ne s’ouvre pas.')

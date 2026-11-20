@@ -2,6 +2,7 @@ import { basename } from 'node:path'
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite'
 import { addDays, isoDate, lastDay, monthEntirelyBefore, nearbyTransferDate, todayIso } from './dates.ts'
 import { LedgerError } from './errors.ts'
+import { formatEuros, formatIsoDate } from './format.ts'
 import { lineMillis, millisToCents, parseQuantity, parseUserAmount, parseUserMillis } from './money.ts'
 import { classifyImport, operationKey, readTabularFile } from './parse-file.ts'
 import { globalFromAccounts, statementSummary } from './summary.ts'
@@ -21,6 +22,7 @@ import type {
   Preview,
   PreviewLine,
   StatementCheck,
+  StatementLock,
   StatementMovement,
   TransferMatch,
   TransferView,
@@ -89,25 +91,28 @@ export function updateAccount(
   const order = bankId === current.bankId
     ? null
     : nextOrder(database, 'SELECT COALESCE(MAX(sort_order), 0) AS value FROM accounts WHERE bank_id = ?', [bankId])
-  run(
-    database,
-    `UPDATE accounts
-     SET name = ?, bank_id = ?, archived = ?, mapping_json = ?, opening_cents = ?, opening_millis = ?, opening_date = ?,
-         sort_order = COALESCE(?, sort_order)
-     WHERE id = ?`,
-    [
-      name,
-      bankId,
-      input.archived ? 1 : 0,
-      current.kind === 'courant' && mapping ? JSON.stringify(mapping) : null,
-      opening.cents,
-      opening.millis,
-      opening.date,
-      order,
-      id,
-    ],
-  )
-  deleteEmptyBanks(database)
+  transaction(database, () => {
+    run(
+      database,
+      `UPDATE accounts
+       SET name = ?, bank_id = ?, archived = ?, mapping_json = ?, opening_cents = ?, opening_millis = ?, opening_date = ?,
+           sort_order = COALESCE(?, sort_order)
+       WHERE id = ?`,
+      [
+        name,
+        bankId,
+        input.archived ? 1 : 0,
+        current.kind === 'courant' && mapping ? JSON.stringify(mapping) : null,
+        opening.cents,
+        opening.millis,
+        opening.date,
+        order,
+        id,
+      ],
+    )
+    deleteEmptyBanks(database)
+    guardStatements(database, [id])
+  })
   return getAccount(database, id)
 }
 
@@ -306,21 +311,99 @@ function byMovement(left: StatementMovement, right: StatementMovement): number {
   return left.date.localeCompare(right.date) || left.label.localeCompare(right.label, 'fr') || left.amount - right.amount
 }
 
+export function listStatements(database: DatabaseSync, accountId: number): StatementLock[] {
+  const account = getAccount(database, accountId)
+  return all(
+    database,
+    'SELECT date, amount_cents FROM statements WHERE account_id = ? ORDER BY date DESC',
+    [accountId],
+  ).map((row) => {
+    const date = String(row.date)
+    return {
+      date,
+      cents: numberValue(row.amount_cents),
+      currentCents: accountFigures(database, account, date).currentCents,
+    }
+  })
+}
+
 export function validateStatement(database: DatabaseSync, accountId: number, rawDate: string): Account {
   const check = statementAt(database, accountId, rawDate)
   if (check.cents === null) throw new LedgerError('Pas de solde à cette date.')
-  run(database, 'UPDATE accounts SET reconciled_on = ?, reconciled_cents = ? WHERE id = ?', [
-    check.date,
-    check.cents,
-    accountId,
-  ])
+  transaction(database, () => {
+    run(
+      database,
+      `INSERT INTO statements (account_id, date, amount_cents, validated_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(account_id, date) DO UPDATE SET amount_cents = excluded.amount_cents, validated_at = excluded.validated_at`,
+      [accountId, check.date, check.cents, new Date().toISOString()],
+    )
+    refreshReconciled(database, accountId)
+  })
   return getAccount(database, accountId)
 }
 
-export function clearStatement(database: DatabaseSync, accountId: number): Account {
+export function clearStatement(database: DatabaseSync, accountId: number, rawDate: string): Account {
   getAccount(database, accountId)
-  run(database, 'UPDATE accounts SET reconciled_on = NULL, reconciled_cents = NULL WHERE id = ?', [accountId])
+  const date = statementDate(rawDate)
+  const existing = one(database, 'SELECT id FROM statements WHERE account_id = ? AND date = ?', [accountId, date])
+  if (!existing) throw new LedgerError('Ce relevé n’est pas validé.')
+  transaction(database, () => {
+    run(database, 'DELETE FROM statements WHERE account_id = ? AND date = ?', [accountId, date])
+    refreshReconciled(database, accountId)
+  })
   return getAccount(database, accountId)
+}
+
+function refreshReconciled(database: DatabaseSync, accountId: number): void {
+  const latest = one(
+    database,
+    'SELECT date, amount_cents FROM statements WHERE account_id = ? ORDER BY date DESC LIMIT 1',
+    [accountId],
+  )
+  if (!latest) {
+    run(database, 'UPDATE accounts SET reconciled_on = NULL, reconciled_cents = NULL WHERE id = ?', [accountId])
+    return
+  }
+  run(database, 'UPDATE accounts SET reconciled_on = ?, reconciled_cents = ? WHERE id = ?', [
+    String(latest.date),
+    numberValue(latest.amount_cents),
+    accountId,
+  ])
+}
+
+function guardStatements(database: DatabaseSync, accountIds: number[]): void {
+  const seen = new Set<number>()
+  for (const accountId of accountIds) {
+    if (seen.has(accountId)) continue
+    seen.add(accountId)
+    const account = getAccount(database, accountId)
+    const locks = all(
+      database,
+      'SELECT date, amount_cents FROM statements WHERE account_id = ? ORDER BY date',
+      [accountId],
+    )
+    for (const lock of locks) {
+      const date = String(lock.date)
+      const locked = numberValue(lock.amount_cents)
+      const current = accountFigures(database, account, date).currentCents
+      if (current === locked) continue
+      const when = formatIsoDate(date)
+      if (current === null) {
+        throw new LedgerError(`Le relevé du ${when} (${formatEuros(locked)}) ne serait plus calculable.`)
+      }
+      throw new LedgerError(`Le relevé du ${when} passerait de ${formatEuros(locked)} à ${formatEuros(current)}.`)
+    }
+  }
+}
+
+function linkedAccountIds(database: DatabaseSync, operationId: number): number[] {
+  const row = one(
+    database,
+    'SELECT from_account_id, to_account_id FROM transfers WHERE source_operation_id = ? OR dest_operation_id = ?',
+    [operationId, operationId],
+  )
+  if (!row) return []
+  return [numberValue(row.from_account_id), numberValue(row.to_account_id)]
 }
 
 function statementDate(value: string): string {
@@ -350,14 +433,21 @@ export function getAccount(database: DatabaseSync, id: number): Account {
 export function deleteAccount(database: DatabaseSync, id: number): void {
   const account = getAccount(database, id)
   if (!account.archived) throw new LedgerError('Seul un compte archivé peut être effacé.')
+  const others = all(
+    database,
+    'SELECT from_account_id, to_account_id FROM transfers WHERE from_account_id = ? OR to_account_id = ?',
+    [id, id],
+  ).flatMap((row) => [numberValue(row.from_account_id), numberValue(row.to_account_id)].filter((accountId) => accountId !== id))
   transaction(database, () => {
     detachTransfers(database, id)
     run(database, 'DELETE FROM operations WHERE account_id = ?', [id])
     run(database, 'DELETE FROM import_batches WHERE account_id = ?', [id])
     run(database, 'DELETE FROM monthly_balances WHERE account_id = ?', [id])
     run(database, 'DELETE FROM positions WHERE account_id = ?', [id])
+    run(database, 'DELETE FROM statements WHERE account_id = ?', [id])
     run(database, 'DELETE FROM accounts WHERE id = ?', [id])
     deleteEmptyBanks(database)
+    guardStatements(database, others)
   })
 }
 
@@ -579,6 +669,7 @@ export async function confirmImport(
       )
     }
     for (const line of linked) adoptImportedMirror(database, accountId, line)
+    guardStatements(database, [accountId])
     return id
   })
   return { batchId, inserted: ready.length, linked: linked.length }
@@ -603,14 +694,20 @@ export function listBatches(database: DatabaseSync, accountId: number): BatchVie
 }
 
 export function cancelBatch(database: DatabaseSync, batchId: number): number {
-  const batch = one(database, 'SELECT id FROM import_batches WHERE id = ?', [batchId])
+  const batch = one(database, 'SELECT id, account_id FROM import_batches WHERE id = ?', [batchId])
   if (!batch) throw new LedgerError('Import introuvable.')
   const count = numberValue((one(database, 'SELECT COUNT(*) AS count FROM operations WHERE batch_id = ?', [batchId]) as Row).count)
   transaction(database, () => {
+    const touched = new Set<number>([numberValue(batch.account_id)])
     const rows = all(database, 'SELECT id FROM operations WHERE batch_id = ?', [batchId])
-    for (const row of rows) detachOperation(database, numberValue(row.id))
+    for (const row of rows) {
+      const operationId = numberValue(row.id)
+      for (const accountId of linkedAccountIds(database, operationId)) touched.add(accountId)
+      detachOperation(database, operationId)
+    }
     run(database, 'DELETE FROM operations WHERE batch_id = ?', [batchId])
     run(database, 'DELETE FROM import_batches WHERE id = ?', [batchId])
+    guardStatements(database, [...touched])
   })
   return count
 }
@@ -714,6 +811,8 @@ export function pointOperation(
     if (one(database, 'SELECT id FROM transfers WHERE dest_operation_id = ?', [operationId])) {
       throw new LedgerError('Cette ligne vient d’un virement interne.')
     }
+    const touched = new Set<number>([numberValue(operation.account_id), ...linkedAccountIds(database, operationId)])
+    if (counterpartyAccountId !== null) touched.add(counterpartyAccountId)
     const category = one(
       database,
       `SELECT c.archived AS category_archived, c.role, f.archived AS family_archived, f.nature
@@ -753,6 +852,7 @@ export function pointOperation(
       new Date().toISOString(),
       operationId,
     ])
+    guardStatements(database, [...touched])
   })
 }
 
@@ -772,11 +872,14 @@ export function createOperation(
   const amount = centsFromInput(rawAmount)
   if (amount === null || amount === 0) throw new LedgerError('Le montant est requis.')
   const name = requiredName(label, 'Le libellé est requis.')
-  insert(
-    database,
-    'INSERT INTO operations (account_id, batch_id, date, label, amount_cents) VALUES (?, NULL, ?, ?, ?)',
-    [accountId, nextDate, name, amount],
-  )
+  transaction(database, () => {
+    insert(
+      database,
+      'INSERT INTO operations (account_id, batch_id, date, label, amount_cents) VALUES (?, NULL, ?, ?, ?)',
+      [accountId, nextDate, name, amount],
+    )
+    guardStatements(database, [accountId])
+  })
 }
 
 export function createSavingsMovement(
@@ -795,11 +898,14 @@ export function createSavingsMovement(
   const amount = millisFromOptional(rawAmount)
   if (amount === null || amount <= 0) throw new LedgerError('Le montant doit être positif.')
   const name = label.trim() || 'Mouvement'
-  insert(
-    database,
-    'INSERT INTO operations (account_id, batch_id, date, label, amount_cents) VALUES (?, NULL, ?, ?, ?)',
-    [accountId, transferDate(date), name, direction === 'sortie' ? -amount : amount],
-  )
+  transaction(database, () => {
+    insert(
+      database,
+      'INSERT INTO operations (account_id, batch_id, date, label, amount_cents) VALUES (?, NULL, ?, ?, ?)',
+      [accountId, transferDate(date), name, direction === 'sortie' ? -amount : amount],
+    )
+    guardStatements(database, [accountId])
+  })
 }
 
 export function createSavingsTransfer(
@@ -825,22 +931,24 @@ export function createSavingsTransfer(
       sourceOperationId: null,
       matchedOperationId,
     })
+    guardStatements(database, [fromAccountId, toAccountId])
   })
 }
 
 export function unpointOperation(database: DatabaseSync, operationId: number): void {
-  const operation = one(database, 'SELECT id FROM operations WHERE id = ?', [operationId])
+  const operation = one(database, 'SELECT id, account_id FROM operations WHERE id = ?', [operationId])
   if (!operation) throw new LedgerError('Opération introuvable.')
+  const touched = new Set<number>([numberValue(operation.account_id), ...linkedAccountIds(database, operationId)])
   const transfer = one(
     database,
     'SELECT id FROM transfers WHERE source_operation_id = ? OR dest_operation_id = ?',
     [operationId, operationId],
   )
-  if (transfer) {
-    detachTransfer(database, numberValue(transfer.id), null)
-    return
-  }
-  run(database, 'UPDATE operations SET category_id = NULL, pointed_at = NULL WHERE id = ?', [operationId])
+  transaction(database, () => {
+    if (transfer) detachTransfer(database, numberValue(transfer.id), null)
+    else run(database, 'UPDATE operations SET category_id = NULL, pointed_at = NULL WHERE id = ?', [operationId])
+    guardStatements(database, [...touched])
+  })
 }
 
 export function updateManualOperation(
@@ -870,18 +978,22 @@ export function updateManualOperation(
   if (linked && (nextDate !== String(operation.date) || amount !== numberValue(operation.amount_cents))) {
     throw new LedgerError('Pour changer le montant ou la date, ôte d’abord le pointage.')
   }
-  run(database, 'UPDATE operations SET date = ?, value_date = ?, label = ?, amount_cents = ? WHERE id = ?', [
-    nextDate,
-    valueDate && valueDate !== nextDate ? valueDate : null,
-    name,
-    amount,
-    operationId,
-  ])
+  transaction(database, () => {
+    run(database, 'UPDATE operations SET date = ?, value_date = ?, label = ?, amount_cents = ? WHERE id = ?', [
+      nextDate,
+      valueDate && valueDate !== nextDate ? valueDate : null,
+      name,
+      amount,
+      operationId,
+    ])
+    guardStatements(database, [numberValue(operation.account_id)])
+  })
 }
 
 export function deleteManualOperation(database: DatabaseSync, operationId: number): void {
-  const operation = one(database, 'SELECT id, batch_id FROM operations WHERE id = ?', [operationId])
+  const operation = one(database, 'SELECT id, account_id, batch_id FROM operations WHERE id = ?', [operationId])
   if (!operation) throw new LedgerError('Opération introuvable.')
+  const touched = new Set<number>([numberValue(operation.account_id), ...linkedAccountIds(database, operationId)])
   const transfer = one(
     database,
     'SELECT id FROM transfers WHERE source_operation_id = ? OR dest_operation_id = ?',
@@ -891,13 +1003,17 @@ export function deleteManualOperation(database: DatabaseSync, operationId: numbe
     if (transfer) detachTransfer(database, numberValue(transfer.id), null)
     const still = one(database, 'SELECT id FROM operations WHERE id = ?', [operationId])
     if (still) run(database, 'DELETE FROM operations WHERE id = ?', [operationId])
+    guardStatements(database, [...touched])
   })
 }
 
 export function deleteTransfer(database: DatabaseSync, transferId: number): void {
-  const transfer = one(database, 'SELECT id FROM transfers WHERE id = ?', [transferId])
+  const transfer = one(database, 'SELECT id, from_account_id, to_account_id FROM transfers WHERE id = ?', [transferId])
   if (!transfer) throw new LedgerError('Virement introuvable.')
-  detachTransfer(database, transferId, null)
+  transaction(database, () => {
+    detachTransfer(database, transferId, null)
+    guardStatements(database, [numberValue(transfer.from_account_id), numberValue(transfer.to_account_id)])
+  })
 }
 
 export function listTransfers(database: DatabaseSync, accountId: number, year: number): TransferView[] {
@@ -945,46 +1061,53 @@ export function savePosition(
   const value = millisFromInput(input.value)
   if (value < 0) throw new LedgerError('La valeur ne peut pas être négative.')
   const valuedOn = requiredValueDate(input.valuedOn)
-  if (input.id) {
-    const existing = one(database, 'SELECT id FROM positions WHERE id = ? AND account_id = ?', [input.id, input.accountId])
-    if (!existing) throw new LedgerError('Titre introuvable.')
-    run(database, 'UPDATE positions SET name = ?, quantity_micros = ?, value_millis = ?, valued_on = ? WHERE id = ?', [
-      name,
-      quantity,
-      value,
-      valuedOn,
-      input.id,
-    ])
-    return positionById(database, input.id)
-  }
-  const order = nextOrder(
-    database,
-    'SELECT COALESCE(MAX(sort_order), 0) AS value FROM positions WHERE account_id = ?',
-    [input.accountId],
-  )
-  const id = insert(
-    database,
-    'INSERT INTO positions (account_id, name, quantity_micros, value_millis, valued_on, sort_order) VALUES (?, ?, ?, ?, ?, ?)',
-    [input.accountId, name, quantity, value, valuedOn, order],
-  )
-  return positionById(database, id)
+  return transaction(database, () => {
+    if (input.id) {
+      const existing = one(database, 'SELECT id FROM positions WHERE id = ? AND account_id = ?', [input.id, input.accountId])
+      if (!existing) throw new LedgerError('Titre introuvable.')
+      run(database, 'UPDATE positions SET name = ?, quantity_micros = ?, value_millis = ?, valued_on = ? WHERE id = ?', [
+        name,
+        quantity,
+        value,
+        valuedOn,
+        input.id,
+      ])
+      guardStatements(database, [input.accountId])
+      return positionById(database, input.id)
+    }
+    const order = nextOrder(
+      database,
+      'SELECT COALESCE(MAX(sort_order), 0) AS value FROM positions WHERE account_id = ?',
+      [input.accountId],
+    )
+    const id = insert(
+      database,
+      'INSERT INTO positions (account_id, name, quantity_micros, value_millis, valued_on, sort_order) VALUES (?, ?, ?, ?, ?, ?)',
+      [input.accountId, name, quantity, value, valuedOn, order],
+    )
+    guardStatements(database, [input.accountId])
+    return positionById(database, id)
+  })
 }
 
 export function setCash(database: DatabaseSync, accountId: number, raw: string, valuedOn: string): void {
   const account = getAccount(database, accountId)
   if (account.kind !== 'titre') throw new LedgerError('Ce compte n’est pas un compte titre.')
   const value = raw.trim() === '' ? 0 : millisFromInput(raw)
-  run(database, 'UPDATE accounts SET cash_millis = ?, cash_valued_on = ? WHERE id = ?', [
-    value,
-    requiredValueDate(valuedOn),
-    accountId,
-  ])
+  const valued = requiredValueDate(valuedOn)
+  transaction(database, () => {
+    run(database, 'UPDATE accounts SET cash_millis = ?, cash_valued_on = ? WHERE id = ?', [value, valued, accountId])
+    guardStatements(database, [accountId])
+  })
 }
 
 export function deletePosition(database: DatabaseSync, id: number): void {
-  const existing = one(database, 'SELECT id FROM positions WHERE id = ?', [id])
+  const existing = one(database, 'SELECT id, account_id FROM positions WHERE id = ?', [id])
   if (!existing) throw new LedgerError('Titre introuvable.')
-  run(database, 'DELETE FROM positions WHERE id = ?', [id])
+  transaction(database, () => {
+    run(database, 'DELETE FROM positions WHERE id = ?', [id])
+    guardStatements(database, [numberValue(existing.account_id)])
+  })
 }
 
 export function accountSummary(database: DatabaseSync, accountId: number, year: number): AccountSummary {
@@ -1359,7 +1482,7 @@ function matchingLines(
 function manualOperation(database: DatabaseSync, operationId: number): Row {
   const operation = one(
     database,
-    `SELECT o.id, o.date, o.amount_cents, o.batch_id, a.kind, a.opening_date
+    `SELECT o.id, o.account_id, o.date, o.amount_cents, o.batch_id, a.kind, a.opening_date
      FROM operations o JOIN accounts a ON a.id = o.account_id WHERE o.id = ?`,
     [operationId],
   )
