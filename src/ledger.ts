@@ -1154,29 +1154,28 @@ export function accountSummary(database: DatabaseSync, accountId: number, year: 
 }
 
 export function globalSummary(database: DatabaseSync, year: number): GlobalSummary {
-  const accounts = listAccounts(database).filter((account) => !account.archived)
-  return globalFromAccounts(
-    year,
-    accounts.map((account) => {
-      const summary = accountSummary(database, account.id, year)
-      const row = {
-        accountId: account.id,
-        accountName: account.name,
-        bankId: account.bankId,
-        bankName: account.bankName,
-        kind: account.kind,
-      }
-      if (summary.kind === 'titre' || summary.kind === 'epargne') {
-        return {
-          ...row,
-          expense: summary.expense.map(displayedSavingsTotal),
-          income: summary.income.map(displayedSavingsTotal),
-          balance: summary.balances.map((value) => (value === null ? null : millisToCents(value))),
-        }
-      }
-      return { ...row, expense: summary.expenseTotals, income: summary.incomeTotals, balance: summary.balances }
-    }),
-  )
+  const rows = listAccounts(database).flatMap((account) => {
+    const summary = accountSummary(database, account.id, year)
+    const row = {
+      accountId: account.id,
+      accountName: account.name,
+      bankId: account.bankId,
+      bankName: account.bankName,
+      kind: account.kind,
+    }
+    const built =
+      summary.kind === 'titre' || summary.kind === 'epargne'
+        ? {
+            ...row,
+            expense: summary.expense.map(displayedSavingsTotal),
+            income: summary.income.map(displayedSavingsTotal),
+            balance: summary.balances.map((value) => (value === null ? null : millisToCents(value))),
+          }
+        : { ...row, expense: summary.expenseTotals, income: summary.incomeTotals, balance: summary.balances }
+    if (account.archived && !built.balance.some((value) => value !== null && value !== 0)) return []
+    return [built]
+  })
+  return globalFromAccounts(year, rows)
 }
 
 export function operationCount(database: DatabaseSync, accountId?: number): number {

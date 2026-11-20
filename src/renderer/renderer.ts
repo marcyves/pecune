@@ -553,7 +553,9 @@ function renderAccounts(): HTMLElement {
     }),
   )
   page.append(tools)
-  const accounts = (workspace?.accounts ?? []).filter((account) => showArchived || !account.archived)
+  const accounts = (workspace?.accounts ?? []).filter(
+    (account) => showArchived || !account.archived || (account.currentCents !== null && account.currentCents !== 0),
+  )
   if (accounts.length === 0) page.append(el('p', 'empty', 'Aucun compte pour l’instant.'))
   const groups = new Map<string, AccountCard[]>()
   for (const account of accounts) {
@@ -573,7 +575,7 @@ function renderAccounts(): HTMLElement {
     group.append(head, row)
     list.append(group)
     for (const account of items) {
-      const card = button('', 'account-card', () => openAccount(account.id))
+      const card = button('', account.archived ? 'account-card archived' : 'account-card', () => openAccount(account.id))
       const top = el('div', 'account-card-top')
       top.append(el('strong', '', account.name), el('span', 'muted', kindLabel(account.kind)))
       const figures = el('div', 'account-figures')

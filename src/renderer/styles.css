@@ -885,6 +885,16 @@ button.account-card {
   border-radius: 10px;
 }
 
+button.account-card.archived {
+  background: #f3f0ea;
+  color: #8a8178;
+  border-color: #ddd4c6;
+}
+
+button.account-card.archived strong {
+  color: #6d645b;
+}
+
 .account-card-top {
   display: flex;
   justify-content: space-between;

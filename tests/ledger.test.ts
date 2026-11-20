@@ -287,7 +287,8 @@ describe('règles du classeur', () => {
       openingCents: 100000,
       openingDate: '2026-01-01',
     })
-    expect(globalSummary(database, 2026).banks).toHaveLength(0)
+    expect(globalSummary(database, 2026).banks[0].accounts.map((row) => row.accountName)).toEqual(['CCP joint'])
+    expect(globalSummary(database, 2025).banks).toHaveLength(0)
     expect(operationCount(database, account.id)).toBe(1)
     updateAccount(database, account.id, {
       name: 'CCP joint',
@@ -298,6 +299,49 @@ describe('règles du classeur', () => {
       openingDate: '2026-01-01',
     })
     expect(globalSummary(database, 2026).banks[0].accounts).toHaveLength(1)
+  })
+
+  it('masque un compte archivé seulement lorsque son solde est nul', () => {
+    const { database } = tempDatabase()
+    const idle = createAccount(database, {
+      name: 'Vide',
+      bankName: 'Banque Postale',
+      kind: 'courant',
+      mapping: signed,
+      openingCents: 0,
+      openingDate: '2026-01-01',
+    })
+    updateAccount(database, idle.id, {
+      name: 'Vide',
+      bankName: 'Banque Postale',
+      archived: true,
+      mapping: signed,
+      openingCents: 0,
+      openingDate: '2026-01-01',
+    })
+    const active = createAccount(database, {
+      name: 'CCP',
+      bankName: 'Banque Postale',
+      kind: 'courant',
+      mapping: signed,
+      openingCents: 4000,
+      openingDate: '2026-01-01',
+    })
+    updateAccount(database, active.id, {
+      name: 'CCP',
+      bankName: 'Banque Postale',
+      archived: true,
+      mapping: signed,
+      openingCents: 4000,
+      openingDate: '2026-01-01',
+    })
+    expect(globalSummary(database, 2026).banks[0].accounts.map((row) => row.accountName)).toEqual(['CCP'])
+    expect(globalSummary(database, 2025).banks).toHaveLength(0)
+    createOperation(database, active.id, '2026-03-10', 'SOLDE', '-40,00')
+    expect(globalSummary(database, 2026).banks[0].accounts.map((row) => row.accountName)).toEqual(['CCP'])
+    expect(globalSummary(database, 2026).banks[0].accounts[0].balance.slice(0, 2).every((value) => value === 4000)).toBe(true)
+    expect(globalSummary(database, 2026).banks[0].accounts[0].balance.slice(2).every((value) => value === 0)).toBe(true)
+    expect(globalSummary(database, 2027).banks).toHaveLength(0)
   })
 
   it('efface un compte archivé et ce qu’il contient', async () => {
