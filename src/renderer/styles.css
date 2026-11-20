@@ -376,6 +376,7 @@ h2 { font-size: 1.25rem; }
 
 .tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.35rem;
   margin: 0 0 0.85rem;
 }

@@ -146,7 +146,9 @@ let pointFilter: number | null = null
 let editingOperationId: number | null = null
 let globalView: 'balance' | 'expense' | 'income' = 'balance'
 let globalOrder = false
-let accountTab: 'depense' | 'encaissement' | 'operations' = 'depense'
+type AccountTab = 'releves' | 'imports' | 'depense' | 'encaissement' | 'operations'
+
+let accountTab: AccountTab = 'releves'
 let movingCategoryId: number | null = null
 let categoriesEdit = false
 let notice = ''
@@ -613,11 +615,6 @@ function renderAccount(): HTMLElement {
   }
   page.append(tools)
   page.append(accountHeadingFigures(account, detail.summary))
-  page.append(statementCard(account, detail.statements))
-  if (account.kind === 'courant') {
-    page.append(renderBatches(detail.batches, account))
-    if (preview && importFile) page.append(renderPreview(account.id))
-  }
   page.append(accountTabs(account, detail.summary))
   return page
 }
@@ -657,7 +654,6 @@ function accountHeadingFigures(account: Account, summary: AccountSummary): HTMLE
 
 function statementCard(account: Account, locks: StatementLock[]): HTMLElement {
   const card = el('section', 'card')
-  card.append(el('h2', '', 'Relevé'))
   card.append(
     el(
       'p',
@@ -849,26 +845,37 @@ function openingForm(account: Account): HTMLElement {
 function accountTabs(account: Account, summary: AccountSummary): HTMLElement {
   const page = el('div')
   const tabs = el('div', 'tabs')
-  for (const [id, label] of [
-    ['depense', 'Dépenses'],
-    ['encaissement', 'Encaissements'],
-    ['operations', 'Opérations'],
-  ] as const) {
-    tabs.append(
-      button(label, accountTab === id ? 'active' : '', () => selectAccountTab(id)),
-    )
+  const items: { id: AccountTab; label: string }[] = [{ id: 'releves', label: 'Relevés' }]
+  if (account.kind === 'courant') items.push({ id: 'imports', label: 'Imports' })
+  items.push(
+    { id: 'depense', label: 'Dépenses' },
+    { id: 'encaissement', label: 'Encaissements' },
+    { id: 'operations', label: 'Opérations' },
+  )
+  const active = items.some((item) => item.id === accountTab) ? accountTab : 'releves'
+  for (const item of items) {
+    tabs.append(button(item.label, active === item.id ? 'active' : '', () => selectAccountTab(item.id)))
   }
   page.append(tabs)
-  if (accountTab === 'depense') page.append(naturePane(summary, 'depense'))
-  if (accountTab === 'encaissement') page.append(naturePane(summary, 'encaissement'))
-  if (accountTab === 'operations') page.append(operationsPane(account))
+  if (active === 'releves') page.append(statementCard(account, detail?.statements ?? []))
+  if (active === 'imports') page.append(importsPane(account))
+  if (active === 'depense') page.append(naturePane(summary, 'depense'))
+  if (active === 'encaissement') page.append(naturePane(summary, 'encaissement'))
+  if (active === 'operations') page.append(operationsPane(account))
   return page
 }
 
-function selectAccountTab(next: 'depense' | 'encaissement' | 'operations'): void {
+function selectAccountTab(next: AccountTab): void {
   accountTab = next
-  if (next === 'operations' || (drill && drill.nature !== next)) drill = null
+  if ((next !== 'depense' && next !== 'encaissement') || (drill && drill.nature !== next)) drill = null
   render()
+}
+
+function importsPane(account: Account): HTMLElement {
+  const page = el('div')
+  page.append(renderBatches(detail?.batches ?? [], account))
+  if (preview && importFile) page.append(renderPreview(account.id))
+  return page
 }
 
 function naturePane(summary: AccountSummary, nature: Nature): HTMLElement {
@@ -1484,10 +1491,7 @@ function accountChoiceLabel(id: string): string {
 function renderBatches(batches: BatchView[], account: Account): HTMLElement {
   const card = el('section', 'card')
   const head = el('div', 'section-head')
-  head.append(
-    el('h2', '', 'Imports'),
-    button('Importer un relevé', 'primary', () => { void startImport(account.id) }),
-  )
+  head.append(button('Importer un relevé', 'primary', () => { void startImport(account.id) }))
   card.append(head)
   if (batches.length === 0) card.append(el('p', 'empty', 'Aucun import.'))
   for (const batch of batches) {
@@ -2203,7 +2207,7 @@ async function move(kind: 'family' | 'category', id: number, direction: -1 | 1):
 
 async function go(next: Screen): Promise<void> {
   screen = next
-  accountTab = 'depense'
+  accountTab = 'releves'
   movingCategoryId = null
   categoriesEdit = false
   editing = false
@@ -2223,7 +2227,7 @@ async function go(next: Screen): Promise<void> {
 async function openAccount(id: number): Promise<void> {
   accountId = id
   screen = 'account'
-  accountTab = 'depense'
+  accountTab = 'releves'
   editing = false
   editingOperationId = null
   draftBank = null
@@ -2245,7 +2249,7 @@ async function changeYear(next: number): Promise<void> {
 
 function startNewAccount(bankName: string | null): void {
   accountId = null
-  accountTab = 'depense'
+  accountTab = 'releves'
   editing = true
   draftBank = bankName
   detail = null
