@@ -209,6 +209,8 @@ h1 { font-size: 1.8rem; }
 
   body:has(.print-root:not(:empty)) .app { display: none !important; }
 
+  .modal-backdrop { display: none !important; }
+
   .print-page { break-after: page; page-break-after: always; }
   .print-page:last-child { break-after: auto; page-break-after: auto; }
 }
@@ -779,15 +781,26 @@ td.num button.amount {
   color: inherit;
 }
 
-.drill {
+.modal-backdrop {
   position: fixed;
-  z-index: 20;
-  right: 1.25rem;
-  bottom: 1.25rem;
-  width: min(42rem, calc(100vw - 18rem));
-  max-height: min(28rem, 60vh);
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: rgba(28, 40, 34, 0.32);
+  overflow: auto;
+}
+
+.modal {
+  width: min(52rem, 100%);
+  max-height: calc(100vh - 3rem);
+  min-height: 0;
+  margin: auto;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   background: #fffdf8;
   border: 1px solid #d9cebf;
   border-radius: 10px;
@@ -795,21 +808,43 @@ td.num button.amount {
   padding: 0.9rem 1rem 1rem;
 }
 
-.drill-head {
+.modal-head {
   display: flex;
   justify-content: space-between;
   align-items: start;
   gap: 1rem;
+  flex: 0 0 auto;
 }
 
-.drill-head h2 { margin-bottom: 0.2rem; }
+.modal-head h2 {
+  margin-bottom: 0.2rem;
+}
 
-.drill .table-wrap {
+.modal .table-wrap {
   overflow: auto;
   min-height: 0;
 }
 
-.drill table.grid { width: 100%; min-width: 0; }
+.modal table.grid { width: 100%; min-width: 0; }
+
+.modal td.account {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+button.category-line {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 0.15rem 0.25rem;
+  border-radius: 6px;
+  text-align: left;
+}
+
+button.category-line:hover {
+  background: #efe6da;
+  border-color: transparent;
+}
 
 .empty { color: #6d645b; }
 

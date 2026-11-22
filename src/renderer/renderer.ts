@@ -6,6 +6,7 @@ import type {
   AccountSummary,
   BatchView,
   Category,
+  CategoryOperation,
   CategoryRow,
   Family,
   GlobalSummary,
@@ -71,6 +72,7 @@ type ComptesApi = {
   moveFamily: (id: number, direction: -1 | 1) => Promise<Result<unknown>>
   saveCategory: (input: unknown) => Promise<Result<unknown>>
   moveCategory: (id: number, direction: -1 | 1) => Promise<Result<unknown>>
+  categoryOperations: (categoryId: number, year: number) => Promise<Result<CategoryOperation[]>>
   moveAccount: (id: number, direction: -1 | 1) => Promise<Result<unknown>>
   setMonthlyBalance: (accountId: number, month: string, raw: string) => Promise<Result<unknown>>
   statementAt: (accountId: number, date: string) => Promise<Result<StatementCheck>>
@@ -151,6 +153,8 @@ type AccountTab = 'releves' | 'imports' | 'depense' | 'encaissement' | 'operatio
 let accountTab: AccountTab = 'releves'
 let movingCategoryId: number | null = null
 let categoriesEdit = false
+let categoryLook: { categoryId: number; name: string } | null = null
+let categoryOperations: CategoryOperation[] | null = null
 let notice = ''
 let statementDate = ''
 let statementLook: StatementCheck | null = null
@@ -198,9 +202,10 @@ async function boot(): Promise<void> {
 
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return
-  if (!drill && movingCategoryId === null) return
+  if (!drill && movingCategoryId === null && !categoryLook) return
   drill = null
   movingCategoryId = null
+  closeCategoryLook()
   render()
 })
 
@@ -247,6 +252,7 @@ function render(): void {
   shell.append(sidebar(), main())
   app.append(shell)
   if (screen === 'account' && drill) app.append(drillPanel())
+  if (screen === 'categories' && categoryLook) app.append(categoryModal())
   if (kept && screen === 'pointing') restoreScroll(kept)
 }
 
@@ -1252,34 +1258,107 @@ function openDrill(next: Drill): void {
 }
 
 function drillPanel(): HTMLElement {
-  const panel = el('section', 'drill')
   const current = drill
-  const head = el('div', 'drill-head')
   const title = !current
     ? ''
     : current.month === null
       ? `${current.name} · ${year}`
       : `${current.name} · ${MONTH_LABELS[current.month - 1]} ${year}`
-  head.append(el('h2', '', title), button('Fermer', '', () => { drill = null; render() }))
-  panel.append(head)
+  const content: HTMLElement[] = []
   const operations = operationsForDrill()
   if (operations.length === 0) {
-    panel.append(el('p', 'empty', 'Aucune opération.'))
-    return panel
+    content.push(el('p', 'empty', 'Aucune opération.'))
+    return modal(title, () => { drill = null; render() }, content)
   }
   const total = operations.reduce((sum, operation) => {
     if (current?.categoryId === null && current.nature === 'depense') return sum + Math.abs(operation.amountCents)
     return sum + operation.amountCents
   }, 0)
-  panel.append(el('p', 'muted', `${operations.length} ${operations.length > 1 ? 'opérations' : 'opération'} · ${formatEuros(total)}`))
+  content.push(el('p', 'muted', operationCount(operations.length, total)))
   const table = lineTable('Date', 'Libellé', 'Montant')
   for (const operation of operations) {
     const row = el('tr')
     row.append(datedCell(operation.date, operation.valueDate), labelText(operation.label), moneyCell(operation.amountCents))
     table.append(row)
   }
-  panel.append(wrap(table))
-  return panel
+  content.push(wrap(table))
+  return modal(title, () => { drill = null; render() }, content)
+}
+
+function categoryModal(): HTMLElement {
+  const current = categoryLook
+  const title = current ? `${current.name} · ${year}` : ''
+  const content: HTMLElement[] = []
+  if (!categoryOperations) {
+    content.push(el('p', 'empty', 'Chargement…'))
+    return modal(title, closeCategoryLookAndRender, content)
+  }
+  if (categoryOperations.length === 0) {
+    content.push(el('p', 'empty', 'Aucune opération.'))
+    return modal(title, closeCategoryLookAndRender, content)
+  }
+  const total = categoryOperations.reduce((sum, operation) => sum + operation.amountCents, 0)
+  content.push(el('p', 'muted', operationCount(categoryOperations.length, total)))
+  const table = lineTable('Date', 'Compte', 'Libellé', 'Montant')
+  for (const operation of categoryOperations) {
+    const row = el('tr')
+    const account = el('td', 'account', `${operation.accountName} · ${operation.bankName}`)
+    row.append(datedCell(operation.date, operation.valueDate), account, labelText(operation.label), moneyCell(operation.amountCents))
+    table.append(row)
+  }
+  content.push(wrap(table))
+  return modal(title, closeCategoryLookAndRender, content)
+}
+
+function operationCount(count: number, total: number): string {
+  return `${count} ${count > 1 ? 'opérations' : 'opération'} · ${formatEuros(total)}`
+}
+
+function modal(title: string, onClose: () => void, content: HTMLElement[]): HTMLElement {
+  const backdrop = el('div', 'modal-backdrop')
+  backdrop.addEventListener('click', (event) => {
+    if (event.target === backdrop) onClose()
+  })
+  const panel = el('section', 'modal')
+  panel.setAttribute('role', 'dialog')
+  panel.setAttribute('aria-modal', 'true')
+  const heading = el('h2', '', title)
+  heading.id = 'modal-title'
+  panel.setAttribute('aria-labelledby', 'modal-title')
+  const head = el('div', 'modal-head')
+  head.append(heading, button('Fermer', '', onClose))
+  panel.append(head, ...content)
+  backdrop.append(panel)
+  return backdrop
+}
+
+function closeCategoryLook(): void {
+  categoryLook = null
+  categoryOperations = null
+}
+
+function closeCategoryLookAndRender(): void {
+  closeCategoryLook()
+  render()
+}
+
+function openCategoryOperations(category: Category): void {
+  const request = category.id
+  const shownYear = year
+  categoryLook = { categoryId: category.id, name: category.name }
+  categoryOperations = null
+  render()
+  void follow(async () => {
+    const rows = await ask(window.comptes.categoryOperations(request, shownYear))
+    if (!categoryLook || categoryLook.categoryId !== request || year !== shownYear) return
+    if (!rows) {
+      closeCategoryLook()
+      render()
+      return
+    }
+    categoryOperations = rows
+    render()
+  })
 }
 
 function operationsForDrill(): OperationView[] {
@@ -1722,6 +1801,7 @@ function renderCategories(): HTMLElement {
   const edit = glyphButton('Modifier les catégories', 'edit', () => {
     categoriesEdit = !categoriesEdit
     if (!categoriesEdit) movingCategoryId = null
+    if (categoriesEdit) closeCategoryLook()
     render()
   })
   if (categoriesEdit) edit.classList.add('active')
@@ -1802,9 +1882,13 @@ function familyCard(family: Family): HTMLElement {
     const targets = (workspace?.families ?? []).filter((item) => item.nature === family.nature && item.id !== family.id)
     const moving = categoriesEdit && movingCategoryId === category.id
     const amount = totalAmount(categoryTotal(category.id))
-    const row = el('div', 'category-line')
-    if (!categoriesEdit) {
+    const row = el(categoriesEdit ? 'div' : 'button', 'category-line')
+    if (!categoriesEdit && row instanceof HTMLButtonElement) {
+      row.type = 'button'
+      row.setAttribute('aria-haspopup', 'dialog')
+      row.setAttribute('aria-label', `Opérations de ${category.name}`)
       row.append(el('span', 'category-name', category.name), amount)
+      row.addEventListener('click', () => openCategoryOperations(category))
     } else {
       const moveButton = glyphButton('Déplacer', 'move', () => {
         if (targets.length === 0) {
@@ -2212,6 +2296,7 @@ async function go(next: Screen): Promise<void> {
   accountTab = 'releves'
   movingCategoryId = null
   categoriesEdit = false
+  closeCategoryLook()
   editing = false
   draftBank = null
   preview = null
@@ -2238,6 +2323,7 @@ async function openAccount(id: number): Promise<void> {
   statementDate = ''
   statementLook = null
   drill = null
+  closeCategoryLook()
   await loadDetail()
   render()
 }
@@ -2245,6 +2331,7 @@ async function openAccount(id: number): Promise<void> {
 async function changeYear(next: number): Promise<void> {
   year = next
   drill = null
+  closeCategoryLook()
   await loadWorkspace()
   render()
 }

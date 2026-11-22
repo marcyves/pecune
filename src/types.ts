@@ -173,6 +173,16 @@ export type GlobalSummary = {
   balance: number[]
 }
 
+export type CategoryOperation = {
+  id: number
+  date: string
+  valueDate: string | null
+  accountName: string
+  bankName: string
+  label: string
+  amountCents: number
+}
+
 export type OperationView = {
   id: number
   date: string

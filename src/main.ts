@@ -28,6 +28,7 @@ import {
   createSavingsTransfer,
   deleteManualOperation,
   deleteTransfer,
+  listCategoryOperations,
   listOperations,
   listStatements,
   listTransfers,
@@ -278,6 +279,9 @@ function register(): void {
     return createCategory(db, { name: value.name, familyId: value.familyId })
   })
   handle('moveCategory', (id, direction) => moveCategory(requireDatabase(), Number(id), direction as -1 | 1))
+  handle('categoryOperations', (categoryId, year) =>
+    listCategoryOperations(requireDatabase(), Number(categoryId), Number(year)),
+  )
   handle('moveAccount', (id, direction) => moveAccount(requireDatabase(), Number(id), direction as -1 | 1))
   handle('setMonthlyBalance', (accountId, month, raw) => {
     setMonthlyBalance(requireDatabase(), Number(accountId), String(month), centsFromInput(String(raw)))

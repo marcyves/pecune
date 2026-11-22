@@ -12,6 +12,7 @@ import type {
   AccountSummary,
   BatchView,
   Category,
+  CategoryOperation,
   DateFormat,
   Family,
   GlobalSummary,
@@ -569,6 +570,36 @@ export function categoryTotals(database: DatabaseSync, year: number): Map<number
     totals.set(categoryId, (totals.get(categoryId) ?? 0) + numberValue(row.amount_cents))
   }
   return totals
+}
+
+export function listCategoryOperations(database: DatabaseSync, categoryId: number, year: number): CategoryOperation[] {
+  return all(
+    database,
+    `SELECT o.id, o.date, o.value_date, o.label, o.amount_cents,
+            a.name AS account_name, b.name AS bank_name, a.opening_date
+     FROM operations o
+     JOIN accounts a ON a.id = o.account_id
+     JOIN banks b ON b.id = a.bank_id
+     WHERE o.category_id = ? AND a.kind = 'courant' AND o.date >= ? AND o.date <= ?
+     ORDER BY o.date, a.name, o.id`,
+    [categoryId, `${year}-01-01`, `${year}-12-31`],
+  ).flatMap((row) => {
+    const date = String(row.date)
+    const opening = row.opening_date === null || row.opening_date === undefined ? null : String(row.opening_date)
+    const month = Number(date.slice(5, 7))
+    if (opening && monthEntirelyBefore(Number(date.slice(0, 4)), month, opening)) return []
+    return [
+      {
+        id: numberValue(row.id),
+        date,
+        valueDate: row.value_date === null || row.value_date === undefined ? null : String(row.value_date),
+        accountName: String(row.account_name),
+        bankName: String(row.bank_name),
+        label: String(row.label),
+        amountCents: numberValue(row.amount_cents),
+      },
+    ]
+  })
 }
 
 export function listFamilies(database: DatabaseSync): Family[] {

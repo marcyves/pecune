@@ -27,6 +27,7 @@ import {
   globalSummary,
   listAccounts,
   listFamilies,
+  listCategoryOperations,
   listOperations,
   listStatements,
   listUnpointed,
@@ -499,6 +500,10 @@ describe('règles du classeur', () => {
     pointOperation(database, rows.find((row) => row.date === '2026-01-10')!.id, courses.id)
     pointOperation(database, rows.find((row) => row.date === '2026-02-15')!.id, courses.id)
     expect(categoryTotals(database, 2026).get(courses.id)).toBe(-1250)
+    expect(listCategoryOperations(database, courses.id, 2026).map((row) => [row.date, row.accountName, row.label, row.amountCents])).toEqual([
+      ['2026-01-10', 'CCP', 'AUCHAN', -1000],
+      ['2026-02-15', 'CCP', 'AUCHAN', -250],
+    ])
     updateAccount(database, account.id, {
       name: account.name,
       bankName: account.bankName,
@@ -508,7 +513,9 @@ describe('règles du classeur', () => {
       openingDate: '2026-02-01',
     })
     expect(categoryTotals(database, 2026).get(courses.id)).toBe(-250)
+    expect(listCategoryOperations(database, courses.id, 2026).map((row) => row.amountCents)).toEqual([-250])
     expect(categoryTotals(database, 2025).has(courses.id)).toBe(false)
+    expect(listCategoryOperations(database, courses.id, 2025)).toEqual([])
   })
 
   it('range les comptes d’une banque dans l’ordre choisi', () => {

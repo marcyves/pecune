@@ -21,6 +21,7 @@ const comptes = {
   moveFamily: (id: number, direction: -1 | 1) => call<unknown>('moveFamily', id, direction),
   saveCategory: (input: unknown) => call<unknown>('saveCategory', input),
   moveCategory: (id: number, direction: -1 | 1) => call<unknown>('moveCategory', id, direction),
+  categoryOperations: (categoryId: number, year: number) => call<unknown>('categoryOperations', categoryId, year),
   moveAccount: (id: number, direction: -1 | 1) => call<unknown>('moveAccount', id, direction),
   setMonthlyBalance: (accountId: number, month: string, raw: string) =>
     call<unknown>('setMonthlyBalance', accountId, month, raw),
